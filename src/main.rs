@@ -11,7 +11,6 @@ fn main() -> io::Result<()> {
     let initial_state = enable_raw_mode();
     refresh_screen();
 
-    let mut buffer = [0_u8; 1];
     loop {
         for b in io::stdin()
             .lock()
@@ -22,6 +21,7 @@ fn main() -> io::Result<()> {
                 Ok(c) => {
                     if c == ctrl_key('q') {
                         refresh_screen();
+                        termios::tcsetattr(io::stdin().as_raw_fd(), TCSAFLUSH, &initial_state);
                         std::process::exit(0);
                     }
 
