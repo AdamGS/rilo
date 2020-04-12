@@ -1,13 +1,13 @@
 use crate::KeyPress::Key;
 use nix::libc::{ioctl, TIOCGWINSZ};
 use std::cell::RefCell;
-use std::io::{self, BufRead, Error, Read, Write};
+use std::io::{self, Read, Write};
 use std::os::raw::c_short;
 use std::os::unix::prelude::*;
 use termios::*;
 
-fn ctrl_key(c: char) -> char {
-    (c as u8 & 0x1f).into()
+fn ctrl_key(c: char) -> u8 {
+    c as u8 & 0x1f
 }
 
 struct RawMode {
@@ -18,9 +18,7 @@ impl RawMode {
     pub fn enable_raw_mode() -> Self {
         let fd = io::stdin().as_raw_fd();
         let mut term = Termios::from_fd(fd).unwrap();
-        let mut raw_mode = Self {
-            inner: term.clone(),
-        };
+        let raw_mode = Self { inner: term };
 
         term.c_iflag &= !(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
         term.c_oflag &= !(OPOST);
@@ -29,14 +27,14 @@ impl RawMode {
         term.c_cc[VMIN] = 0;
         term.c_cc[VTIME] = 1;
 
-        termios::tcsetattr(fd, TCSAFLUSH, &term);
+        termios::tcsetattr(fd, TCSAFLUSH, &term).unwrap();
         raw_mode
     }
 }
 
 impl Drop for RawMode {
     fn drop(&mut self) {
-        termios::tcsetattr(io::stdin().as_raw_fd(), TCSAFLUSH, &self.inner);
+        termios::tcsetattr(io::stdin().as_raw_fd(), TCSAFLUSH, &self.inner).unwrap();
     }
 }
 
@@ -61,7 +59,7 @@ impl Editor {
 
         unsafe {
             winsize = std::mem::zeroed();
-            ioctl(fd, TIOCGWINSZ.into(), &mut winsize as *mut _);
+            ioctl(fd, TIOCGWINSZ, &mut winsize as *mut _);
         }
 
         let rows = winsize.ws_row;
@@ -85,7 +83,7 @@ thread_local!(static EDITOR: RefCell<Editor> = RefCell::new(Editor::new()));
 
 fn main() -> io::Result<()> {
     EDITOR.with(|ref_e| {
-        let e = ref_e.borrow();
+        let _ce = ref_e.borrow();
     });
     // Initial terminal setup
     refresh_screen();
@@ -113,12 +111,10 @@ fn main() -> io::Result<()> {
 }
 
 fn handle_key(c: u8) -> KeyPress {
-    if c == ctrl_key('q') as u8 {
+    if c == ctrl_key('q') {
         KeyPress::Quit
-    } else if c == ctrl_key('x') as u8 {
+    } else if c == ctrl_key('x') {
         KeyPress::Refresh
-    } else if !(c as char).is_control() {
-        KeyPress::Key(c)
     } else {
         KeyPress::Key(c)
     }
@@ -131,12 +127,12 @@ fn refresh_screen() {
 
 fn clear_screen() {
     print!("\x1B[2J");
-    io::stdout().flush();
+    io::stdout().flush().unwrap();
 }
 
 fn goto_start() {
     print!("\x1b[H");
-    io::stdout().flush();
+    io::stdout().flush().unwrap();
 }
 
 fn draw_rows() {
@@ -147,5 +143,5 @@ fn draw_rows() {
         }
     });
 
-    io::stdout().flush();
+    io::stdout().flush().unwrap();
 }
