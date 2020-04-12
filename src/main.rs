@@ -1,4 +1,8 @@
+use crate::KeyPress::Key;
+use nix::libc::{ioctl, TIOCGWINSZ};
+use std::cell::RefCell;
 use std::io::{self, BufRead, Error, Read, Write};
+use std::os::raw::c_short;
 use std::os::unix::prelude::*;
 use termios::*;
 
@@ -11,7 +15,7 @@ struct RawMode {
 }
 
 impl RawMode {
-    fn enable_raw_mode() -> Self {
+    pub fn enable_raw_mode() -> Self {
         let fd = io::stdin().as_raw_fd();
         let mut term = Termios::from_fd(fd).unwrap();
         let mut raw_mode = Self {
@@ -36,21 +40,54 @@ impl Drop for RawMode {
     }
 }
 
+#[repr(C)]
+struct WindowSize {
+    ws_row: c_short,
+    ws_col: c_short,
+    ws_xpixel: c_short,
+    ws_ypxiel: c_short,
+}
+
 struct Editor {
     mode: RawMode,
+    rows: i16,
+    cols: i16,
 }
 
 impl Editor {
     pub fn new() -> Self {
+        let fd = io::stdin().as_raw_fd();
+        let mut winsize: WindowSize;
+
+        unsafe {
+            winsize = std::mem::zeroed();
+            ioctl(fd, TIOCGWINSZ.into(), &mut winsize as *mut _);
+        }
+
+        let rows = winsize.ws_row;
+        let cols = winsize.ws_col;
+
         Editor {
             mode: RawMode::enable_raw_mode(),
+            rows,
+            cols,
         }
     }
 }
 
+enum KeyPress {
+    Quit,
+    Refresh,
+    Key(u8),
+}
+
+thread_local!(static EDITOR: RefCell<Editor> = RefCell::new(Editor::new()));
+
 fn main() -> io::Result<()> {
+    EDITOR.with(|ref_e| {
+        let e = ref_e.borrow();
+    });
     // Initial terminal setup
-    let mut e = Editor::new();
     refresh_screen();
     draw_rows();
     goto_start();
@@ -59,27 +96,32 @@ fn main() -> io::Result<()> {
 
     while let len = io::stdin().read(&mut one_buff) {
         if len.unwrap() != 0 {
-            let c = one_buff[0] as char;
-            if c == ctrl_key('q') {
-                refresh_screen();
-                std::mem::drop(e);
-                break;
-            }
-
-            if c == ctrl_key('x') {
-                refresh_screen();
-                continue;
-            }
-
-            if !c.is_control() {
-                print!("I Got: {}\r\n", c);
-            } else {
-                print!("Code: {}\r\n", c as u8);
+            match handle_key(one_buff[0]) {
+                KeyPress::Quit => {
+                    refresh_screen();
+                    break;
+                }
+                KeyPress::Refresh => {
+                    refresh_screen();
+                }
+                Key(_) => {}
             }
         }
     }
 
     Ok(())
+}
+
+fn handle_key(c: u8) -> KeyPress {
+    if c == ctrl_key('q') as u8 {
+        KeyPress::Quit
+    } else if c == ctrl_key('x') as u8 {
+        KeyPress::Refresh
+    } else if !(c as char).is_control() {
+        KeyPress::Key(c)
+    } else {
+        KeyPress::Key(c)
+    }
 }
 
 fn refresh_screen() {
@@ -98,9 +140,12 @@ fn goto_start() {
 }
 
 fn draw_rows() {
-    for _ in 0..24 {
-        print!("~\r\n");
-    }
+    EDITOR.with(|e_ref| {
+        let e = e_ref.borrow();
+        for _ in 0..e.rows {
+            print!("~\r\n");
+        }
+    });
 
     io::stdout().flush();
 }
