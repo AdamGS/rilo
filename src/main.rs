@@ -1,13 +1,58 @@
+#![warn(clippy::all)]
+#![warn(clippy::pedantic)]
+
 use crate::KeyPress::Key;
 use nix::libc::{ioctl, TIOCGWINSZ};
 use std::cell::RefCell;
-use std::io::{self, Read, Write};
+use std::io::{self, Error, ErrorKind, Read, Write};
 use std::os::raw::c_short;
 use std::os::unix::prelude::*;
 use termios::*;
 
+enum EscSeq {
+    ClearLine,
+    ClearScreen,
+    GotoStart,
+    HideCursor,
+    ShowCursor,
+}
+
+impl Into<&[u8]> for EscSeq {
+    fn into(self) -> &'static [u8] {
+        match self {
+            EscSeq::ClearLine => b"\x1b[K",
+            EscSeq::ClearScreen => b"\x1b[2J",
+            EscSeq::GotoStart => b"\x1b[H",
+            EscSeq::HideCursor => b"\x1b[?25l",
+            EscSeq::ShowCursor => b"\x1b[?25h",
+        }
+    }
+}
+
+fn send_esc_seq(esc: EscSeq) {
+    stdout_write(esc.into());
+}
+
+const WELCOME_MESSAGE: &str = "rilo Editor - version 0.0.1\r\n";
+
 fn ctrl_key(c: char) -> u8 {
     c as u8 & 0x1f
+}
+
+fn stdout_write(buff: &[u8]) -> io::Result<usize> {
+    let written = io::stdout().lock().write(buff);
+    io::stdout().lock().flush();
+
+    match written {
+        Ok(len) => {
+            if len == buff.len() {
+                Ok(len)
+            } else {
+                Err(Error::from(ErrorKind::Other))
+            }
+        }
+        Err(e) => Err(e),
+    }
 }
 
 struct RawMode {
@@ -47,35 +92,49 @@ struct WindowSize {
 }
 
 struct Editor {
-    mode: RawMode,
+    _mode: RawMode,
     rows: i16,
     cols: i16,
 }
 
 impl Editor {
     pub fn new() -> Self {
-        let fd = io::stdin().as_raw_fd();
-        let mut winsize: WindowSize;
+        let mode = RawMode::enable_raw_mode();
 
-        unsafe {
-            winsize = std::mem::zeroed();
-            ioctl(fd, TIOCGWINSZ, &mut winsize as *mut _);
-        }
-
-        let rows = winsize.ws_row;
-        let cols = winsize.ws_col;
+        let (rows, cols) = get_window_size().unwrap();
 
         Editor {
-            mode: RawMode::enable_raw_mode(),
+            _mode: mode,
             rows,
             cols,
         }
     }
 }
 
+fn get_window_size() -> io::Result<(i16, i16)> {
+    let fd = io::stdin().as_raw_fd();
+    let mut winsize = WindowSize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypxiel: 0,
+    };
+
+    let return_code = unsafe { ioctl(fd, TIOCGWINSZ, &mut winsize as *mut _) };
+    if (return_code == -1) || (winsize.ws_col == 0) {
+        Error::new(
+            ErrorKind::Other,
+            "get_window_size: ioctl failed or returned invalid value",
+        );
+    }
+
+    Ok((winsize.ws_row, winsize.ws_col))
+}
+
 enum KeyPress {
     Quit,
     Refresh,
+    Escape,
     Key(u8),
 }
 
@@ -83,17 +142,17 @@ thread_local!(static EDITOR: RefCell<Editor> = RefCell::new(Editor::new()));
 
 fn main() -> io::Result<()> {
     EDITOR.with(|ref_e| {
-        let _ce = ref_e.borrow();
+        let _e = ref_e.borrow();
     });
-    // Initial terminal setup
+
     refresh_screen();
     draw_rows();
-    goto_start();
+    send_esc_seq(EscSeq::GotoStart);
 
     let mut one_buff = [0; 1];
 
-    while let len = io::stdin().read(&mut one_buff) {
-        if len.unwrap() != 0 {
+    while let len = io::stdin().read(&mut one_buff).unwrap() {
+        if len != 0 {
             match handle_key(one_buff[0]) {
                 KeyPress::Quit => {
                     refresh_screen();
@@ -102,6 +161,7 @@ fn main() -> io::Result<()> {
                 KeyPress::Refresh => {
                     refresh_screen();
                 }
+                KeyPress::Escape => {}
                 Key(_) => {}
             }
         }
@@ -115,33 +175,32 @@ fn handle_key(c: u8) -> KeyPress {
         KeyPress::Quit
     } else if c == ctrl_key('x') {
         KeyPress::Refresh
+    } else if c == 27 {
+        KeyPress::Escape
     } else {
         KeyPress::Key(c)
     }
 }
 
 fn refresh_screen() {
-    clear_screen();
-    goto_start();
-}
-
-fn clear_screen() {
-    print!("\x1B[2J");
-    io::stdout().flush().unwrap();
-}
-
-fn goto_start() {
-    print!("\x1b[H");
-    io::stdout().flush().unwrap();
+    send_esc_seq(EscSeq::HideCursor);
+    send_esc_seq(EscSeq::GotoStart);
+    send_esc_seq(EscSeq::ShowCursor);
 }
 
 fn draw_rows() {
     EDITOR.with(|e_ref| {
         let e = e_ref.borrow();
-        for _ in 0..e.rows {
-            print!("~\r\n");
+        for idx in 0..e.rows {
+            send_esc_seq(EscSeq::ClearLine);
+            if idx == e.rows / 3 {
+                stdout_write(WELCOME_MESSAGE.as_bytes());
+            } else {
+                stdout_write(b"~");
+                if idx < e.rows - 1 {
+                    stdout_write(b"\r\n");
+                }
+            }
         }
     });
-
-    io::stdout().flush().unwrap();
 }
