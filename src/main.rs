@@ -1,13 +1,32 @@
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]
 
+use crate::EscSeq::GotoStart;
 use crate::KeyPress::Key;
 use nix::libc::{ioctl, TIOCGWINSZ};
+use nix::sys::socket::send;
+use nix::unistd::SysconfVar::MQ_OPEN_MAX;
 use std::cell::RefCell;
 use std::io::{self, Error, ErrorKind, Read, Write};
 use std::os::raw::c_short;
 use std::os::unix::prelude::*;
-use termios::*;
+use termios::{
+    Termios, BRKINT, CS8, ECHO, ICANON, ICRNL, IEXTEN, INPCK, ISIG, ISTRIP, IXON, OPOST, TCSAFLUSH,
+    VMIN, VTIME,
+};
+
+#[derive(Copy, Clone, Default)]
+struct CursorPosition {
+    x: i16,
+    y: i16,
+}
+
+enum ArrowKey {
+    Left,
+    Right,
+    Up,
+    Down,
+}
 
 enum EscSeq {
     ClearLine,
@@ -15,22 +34,27 @@ enum EscSeq {
     GotoStart,
     HideCursor,
     ShowCursor,
+    MoveCursor(CursorPosition),
 }
 
-impl Into<&[u8]> for EscSeq {
-    fn into(self) -> &'static [u8] {
+impl Into<Vec<u8>> for EscSeq {
+    fn into(self) -> Vec<u8> {
         match self {
-            EscSeq::ClearLine => b"\x1b[K",
-            EscSeq::ClearScreen => b"\x1b[2J",
-            EscSeq::GotoStart => b"\x1b[H",
-            EscSeq::HideCursor => b"\x1b[?25l",
-            EscSeq::ShowCursor => b"\x1b[?25h",
+            EscSeq::ClearLine => b"\x1b[K".to_vec(),
+            EscSeq::ClearScreen => b"\x1b[2J".to_vec(),
+            EscSeq::GotoStart => b"\x1b[H".to_vec(),
+            EscSeq::HideCursor => b"\x1b[?25l".to_vec(),
+            EscSeq::ShowCursor => b"\x1b[?25h".to_vec(),
+            EscSeq::MoveCursor(cp) => format!("\x1b[{};{}H", cp.y + 1, cp.x + 1)
+                .as_bytes()
+                .to_vec(),
         }
     }
 }
 
 fn send_esc_seq(esc: EscSeq) {
-    stdout_write(esc.into());
+    let v: Vec<u8> = esc.into();
+    stdout_write(&v);
 }
 
 const WELCOME_MESSAGE: &str = "rilo Editor - version 0.0.1\r\n";
@@ -39,20 +63,9 @@ fn ctrl_key(c: char) -> u8 {
     c as u8 & 0x1f
 }
 
-fn stdout_write(buff: &[u8]) -> io::Result<usize> {
-    let written = io::stdout().lock().write(buff);
-    io::stdout().lock().flush();
-
-    match written {
-        Ok(len) => {
-            if len == buff.len() {
-                Ok(len)
-            } else {
-                Err(Error::from(ErrorKind::Other))
-            }
-        }
-        Err(e) => Err(e),
-    }
+fn stdout_write(buff: impl AsRef<[u8]>) {
+    io::stdout().lock().write_all(buff.as_ref()).unwrap();
+    io::stdout().lock().flush().unwrap();
 }
 
 struct RawMode {
@@ -77,12 +90,6 @@ impl RawMode {
     }
 }
 
-impl Drop for RawMode {
-    fn drop(&mut self) {
-        termios::tcsetattr(io::stdin().as_raw_fd(), TCSAFLUSH, &self.inner).unwrap();
-    }
-}
-
 #[repr(C)]
 struct WindowSize {
     ws_row: c_short,
@@ -95,6 +102,7 @@ struct Editor {
     _mode: RawMode,
     rows: i16,
     cols: i16,
+    cur_pos: CursorPosition,
 }
 
 impl Editor {
@@ -102,11 +110,13 @@ impl Editor {
         let mode = RawMode::enable_raw_mode();
 
         let (rows, cols) = get_window_size().unwrap();
+        let cur_pos = Default::default();
 
         Editor {
             _mode: mode,
             rows,
             cols,
+            cur_pos,
         }
     }
 }
@@ -141,13 +151,14 @@ enum KeyPress {
 thread_local!(static EDITOR: RefCell<Editor> = RefCell::new(Editor::new()));
 
 fn main() -> io::Result<()> {
+    // This is a hack to make the EDITOR to initilize, buy maybe everything should be a method of editor?
     EDITOR.with(|ref_e| {
         let _e = ref_e.borrow();
     });
 
     refresh_screen();
     draw_rows();
-    send_esc_seq(EscSeq::GotoStart);
+    //send_esc_seq(EscSeq::GotoStart);
 
     let mut one_buff = [0; 1];
 
@@ -155,13 +166,22 @@ fn main() -> io::Result<()> {
         if len != 0 {
             match handle_key(one_buff[0]) {
                 KeyPress::Quit => {
-                    refresh_screen();
+                    send_esc_seq(EscSeq::ClearScreen);
+                    send_esc_seq(EscSeq::GotoStart);
+                    // Cleaning up here, because Drop implementation caused weird problems.
+                    EDITOR.with(|r| {
+                        let editor = r.borrow();
+                        termios::tcsetattr(io::stdin().as_raw_fd(), TCSAFLUSH, &editor._mode.inner)
+                            .unwrap();
+                    });
                     break;
                 }
                 KeyPress::Refresh => {
                     refresh_screen();
                 }
-                KeyPress::Escape => {}
+                KeyPress::Escape => {
+                    handle_escape_seq();
+                }
                 Key(_) => {}
             }
         }
@@ -182,13 +202,58 @@ fn handle_key(c: u8) -> KeyPress {
     }
 }
 
+fn handle_escape_seq() {
+    let mut buffer = [0; 3];
+
+    io::stdin().lock().read(&mut buffer).unwrap();
+    if buffer[0] == '[' as u8 {
+        let movement = match buffer[1] as char {
+            'A' => ArrowKey::Up,
+            'B' => ArrowKey::Down,
+            'C' => ArrowKey::Right,
+            'D' => ArrowKey::Left,
+            _ => unreachable!(),
+        };
+
+        EDITOR.with(|r| {
+            let mut editor = r.borrow_mut();
+            match movement {
+                ArrowKey::Left => {
+                    if editor.cur_pos.x != 0 {
+                        editor.cur_pos.x -= 1;
+                    }
+                }
+                ArrowKey::Right => {
+                    if editor.cur_pos.x != editor.cols {
+                        editor.cur_pos.x += 1;
+                    }
+                }
+                ArrowKey::Up => {
+                    if editor.cur_pos.y != 0 {
+                        editor.cur_pos.y -= 1;
+                    }
+                }
+                ArrowKey::Down => {
+                    if editor.cur_pos.y != editor.rows {
+                        editor.cur_pos.y += 1;
+                    }
+                }
+            };
+
+            send_esc_seq(EscSeq::MoveCursor(editor.cur_pos));
+        });
+    }
+}
+
 fn refresh_screen() {
     send_esc_seq(EscSeq::HideCursor);
-    send_esc_seq(EscSeq::GotoStart);
+    send_esc_seq(EscSeq::ClearScreen);
+    draw_rows();
     send_esc_seq(EscSeq::ShowCursor);
 }
 
 fn draw_rows() {
+    send_esc_seq(EscSeq::GotoStart);
     EDITOR.with(|e_ref| {
         let e = e_ref.borrow();
         for idx in 0..e.rows {
@@ -202,5 +267,7 @@ fn draw_rows() {
                 }
             }
         }
+
+        send_esc_seq(EscSeq::MoveCursor(e.cur_pos));
     });
 }
