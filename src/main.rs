@@ -90,6 +90,7 @@ impl RawMode {
     }
 }
 
+#[derive(Default)]
 #[repr(C)]
 struct WindowSize {
     ws_row: c_short,
@@ -110,7 +111,7 @@ impl Editor {
         let mode = RawMode::enable_raw_mode();
 
         let (rows, cols) = get_window_size().unwrap();
-        let cur_pos = Default::default();
+        let cur_pos = CursorPosition::default();
 
         Editor {
             _mode: mode,
@@ -123,12 +124,7 @@ impl Editor {
 
 fn get_window_size() -> io::Result<(i16, i16)> {
     let fd = io::stdin().as_raw_fd();
-    let mut winsize = WindowSize {
-        ws_row: 0,
-        ws_col: 0,
-        ws_xpixel: 0,
-        ws_ypxiel: 0,
-    };
+    let mut winsize = WindowSize::default();
 
     let return_code = unsafe { ioctl(fd, TIOCGWINSZ, &mut winsize as *mut _) };
     if (return_code == -1) || (winsize.ws_col == 0) {
