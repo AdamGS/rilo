@@ -122,7 +122,7 @@ struct Editor {
 type Row = String;
 
 impl Editor {
-    pub fn new() -> Self {
+    fn new() -> Self {
         let mode = RawMode::enable_raw_mode();
 
         let (rows, cols) = get_window_size().unwrap();
@@ -138,6 +138,74 @@ impl Editor {
             cur_pos,
             rows: content_rows,
         }
+    }
+
+    fn move_cursor(&mut self, ak: ArrowKey) {
+        match ak {
+            ArrowKey::Left => {
+                if self.cur_pos.x != 0 {
+                    self.cur_pos.x -= 1;
+                }
+            }
+            ArrowKey::Right => {
+                if self.cur_pos.x != self.term_cols {
+                    self.cur_pos.x += 1;
+                }
+            }
+            ArrowKey::Up => {
+                if self.cur_pos.y != 0 {
+                    self.cur_pos.y -= 1;
+                }
+            }
+            ArrowKey::Down => {
+                if self.cur_pos.y != self.term_rows {
+                    self.cur_pos.y += 1;
+                }
+            }
+            ArrowKey::Home => {
+                self.cur_pos.x = 0;
+            }
+            ArrowKey::End => {
+                self.cur_pos.x = self.term_cols;
+            }
+            ArrowKey::PageUp => {
+                self.cur_pos.y = 0;
+            }
+            ArrowKey::PageDown => {
+                self.cur_pos.y = self.term_rows;
+            }
+            ArrowKey::Delete => {}
+        };
+
+        send_esc_seq(EscSeq::MoveCursor(self.cur_pos));
+    }
+
+    fn draw(&self) {
+        send_esc_seq(EscSeq::GotoStart);
+        for idx in 0..self.term_rows {
+            send_esc_seq(EscSeq::ClearLine);
+            if (idx as usize) < self.rows.len() {
+                stdout_write(format!("{}\r\n", &self.rows[idx as usize]));
+            } else {
+                //send_esc_seq(EscSeq::ClearLine);
+                if idx == self.term_rows / 3 {
+                    stdout_write(WELCOME_MESSAGE.as_bytes());
+                } else {
+                    stdout_write(b"~");
+                    if idx < self.term_rows - 1 {
+                        stdout_write(b"\r\n");
+                    }
+                }
+            }
+        }
+
+        send_esc_seq(EscSeq::MoveCursor(self.cur_pos));
+    }
+}
+
+impl Drop for Editor {
+    fn drop(&mut self) {
+        termios::tcsetattr(io::stdin().as_raw_fd(), TCSAFLUSH, &self._mode.inner).unwrap();
     }
 }
 
@@ -156,39 +224,31 @@ fn get_window_size() -> io::Result<(i16, i16)> {
     Ok((winsize.ws_row, winsize.ws_col))
 }
 
-thread_local!(static EDITOR: RefCell<Editor> = RefCell::new(Editor::new()));
-
 fn main() -> io::Result<()> {
     // This is a hack to make the EDITOR to initilize, buy maybe everything should be a method of editor?
-    EDITOR.with(|ref_e| {
-        let _e = ref_e.borrow();
-    });
+    let mut e = Editor::new();
 
     refresh_screen();
-    draw_rows();
+    e.draw();
     //send_esc_seq(EscSeq::GotoStart);
 
-    let mut one_buff = [0; 1];
+    let mut buff = [0; 1];
 
-    while let len = io::stdin().read(&mut one_buff).unwrap() {
+    while let len = io::stdin().read(&mut buff).unwrap() {
         if len != 0 {
-            match handle_key(one_buff[0]) {
+            match handle_key(buff[0]) {
                 KeyPress::Quit => {
                     send_esc_seq(EscSeq::ClearScreen);
                     send_esc_seq(EscSeq::GotoStart);
-                    // Cleaning up here, because Drop implementation caused weird problems.
-                    EDITOR.with(|r| {
-                        let editor = r.borrow();
-                        termios::tcsetattr(io::stdin().as_raw_fd(), TCSAFLUSH, &editor._mode.inner)
-                            .unwrap();
-                    });
+                    // With impl_editor, the drop should work!
                     break;
                 }
                 KeyPress::Refresh => {
                     refresh_screen();
                 }
                 KeyPress::Escape => {
-                    handle_escape_seq();
+                    let ak = handle_escape_seq().unwrap();
+                    e.move_cursor(ak);
                 }
                 Key(_) => {}
             }
@@ -228,47 +288,6 @@ fn handle_escape_seq() -> io::Result<ArrowKey> {
             _ => return Err(Error::from(ErrorKind::InvalidData)),
         };
 
-        EDITOR.with(|r| {
-            let mut editor = r.borrow_mut();
-            match movement {
-                ArrowKey::Left => {
-                    if editor.cur_pos.x != 0 {
-                        editor.cur_pos.x -= 1;
-                    }
-                }
-                ArrowKey::Right => {
-                    if editor.cur_pos.x != editor.term_cols {
-                        editor.cur_pos.x += 1;
-                    }
-                }
-                ArrowKey::Up => {
-                    if editor.cur_pos.y != 0 {
-                        editor.cur_pos.y -= 1;
-                    }
-                }
-                ArrowKey::Down => {
-                    if editor.cur_pos.y != editor.term_rows {
-                        editor.cur_pos.y += 1;
-                    }
-                }
-                ArrowKey::Home => {
-                    editor.cur_pos.x = 0;
-                }
-                ArrowKey::End => {
-                    editor.cur_pos.x = editor.term_cols;
-                }
-                ArrowKey::PageUp => {
-                    editor.cur_pos.y = 0;
-                }
-                ArrowKey::PageDown => {
-                    editor.cur_pos.y = editor.term_rows;
-                }
-                ArrowKey::Delete => {}
-            };
-
-            send_esc_seq(EscSeq::MoveCursor(editor.cur_pos));
-        });
-
         return Ok(movement);
     }
 
@@ -279,29 +298,4 @@ fn refresh_screen() {
     send_esc_seq(EscSeq::HideCursor);
     send_esc_seq(EscSeq::ClearScreen);
     send_esc_seq(EscSeq::ShowCursor);
-}
-
-fn draw_rows() {
-    EDITOR.with(|e_ref| {
-        send_esc_seq(EscSeq::GotoStart);
-        let e = e_ref.borrow();
-        for idx in 0..e.term_rows {
-            send_esc_seq(EscSeq::ClearLine);
-            if (idx as usize) < e.rows.len() {
-                stdout_write(format!("{}\r\n", &e.rows[idx as usize]));
-            } else {
-                //send_esc_seq(EscSeq::ClearLine);
-                if idx == e.term_rows / 3 {
-                    stdout_write(WELCOME_MESSAGE.as_bytes());
-                } else {
-                    stdout_write(b"~");
-                    if idx < e.term_rows - 1 {
-                        stdout_write(b"\r\n");
-                    }
-                }
-            }
-        }
-
-        send_esc_seq(EscSeq::MoveCursor(e.cur_pos));
-    });
 }
