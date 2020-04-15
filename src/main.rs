@@ -116,7 +116,10 @@ struct Editor {
     term_rows: i16,
     term_cols: i16,
     cur_pos: CursorPosition,
+    rows: Vec<Row>,
 }
+
+type Row = String;
 
 impl Editor {
     pub fn new() -> Self {
@@ -125,11 +128,15 @@ impl Editor {
         let (rows, cols) = get_window_size().unwrap();
         let cur_pos = CursorPosition::default();
 
+        let mut content_rows: Vec<Row> = Default::default();
+        content_rows.push("Hello World".to_string());
+
         Editor {
             _mode: mode,
             term_rows: rows - 1,
             term_cols: cols - 1,
             cur_pos,
+            rows: content_rows,
         }
     }
 }
@@ -271,22 +278,26 @@ fn handle_escape_seq() -> io::Result<ArrowKey> {
 fn refresh_screen() {
     send_esc_seq(EscSeq::HideCursor);
     send_esc_seq(EscSeq::ClearScreen);
-    draw_rows();
     send_esc_seq(EscSeq::ShowCursor);
 }
 
 fn draw_rows() {
-    send_esc_seq(EscSeq::GotoStart);
     EDITOR.with(|e_ref| {
+        send_esc_seq(EscSeq::GotoStart);
         let e = e_ref.borrow();
         for idx in 0..e.term_rows {
             send_esc_seq(EscSeq::ClearLine);
-            if idx == e.term_rows / 3 {
-                stdout_write(WELCOME_MESSAGE.as_bytes());
+            if (idx as usize) < e.rows.len() {
+                stdout_write(format!("{}\r\n", &e.rows[idx as usize]));
             } else {
-                stdout_write(b"~");
-                if idx < e.term_rows - 1 {
-                    stdout_write(b"\r\n");
+                //send_esc_seq(EscSeq::ClearLine);
+                if idx == e.term_rows / 3 {
+                    stdout_write(WELCOME_MESSAGE.as_bytes());
+                } else {
+                    stdout_write(b"~");
+                    if idx < e.term_rows - 1 {
+                        stdout_write(b"\r\n");
+                    }
                 }
             }
         }
