@@ -26,6 +26,18 @@ enum ArrowKey {
     Right,
     Up,
     Down,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Delete,
+}
+
+enum KeyPress {
+    Quit,
+    Refresh,
+    Escape,
+    Key(u8),
 }
 
 enum EscSeq {
@@ -101,8 +113,8 @@ struct WindowSize {
 
 struct Editor {
     _mode: RawMode,
-    rows: i16,
-    cols: i16,
+    term_rows: i16,
+    term_cols: i16,
     cur_pos: CursorPosition,
 }
 
@@ -115,8 +127,8 @@ impl Editor {
 
         Editor {
             _mode: mode,
-            rows,
-            cols,
+            term_rows: rows - 1,
+            term_cols: cols - 1,
             cur_pos,
         }
     }
@@ -135,13 +147,6 @@ fn get_window_size() -> io::Result<(i16, i16)> {
     }
 
     Ok((winsize.ws_row, winsize.ws_col))
-}
-
-enum KeyPress {
-    Quit,
-    Refresh,
-    Escape,
-    Key(u8),
 }
 
 thread_local!(static EDITOR: RefCell<Editor> = RefCell::new(Editor::new()));
@@ -198,7 +203,7 @@ fn handle_key(c: u8) -> KeyPress {
     }
 }
 
-fn handle_escape_seq() {
+fn handle_escape_seq() -> io::Result<ArrowKey> {
     let mut buffer = [0; 3];
 
     io::stdin().lock().read(&mut buffer).unwrap();
@@ -208,7 +213,12 @@ fn handle_escape_seq() {
             'B' => ArrowKey::Down,
             'C' => ArrowKey::Right,
             'D' => ArrowKey::Left,
-            _ => unreachable!(),
+            'H' => ArrowKey::Home,
+            'F' => ArrowKey::End,
+            '3' => ArrowKey::Delete,
+            '5' => ArrowKey::PageUp,
+            '6' => ArrowKey::PageDown,
+            _ => return Err(Error::from(ErrorKind::InvalidData)),
         };
 
         EDITOR.with(|r| {
@@ -220,7 +230,7 @@ fn handle_escape_seq() {
                     }
                 }
                 ArrowKey::Right => {
-                    if editor.cur_pos.x != editor.cols {
+                    if editor.cur_pos.x != editor.term_cols {
                         editor.cur_pos.x += 1;
                     }
                 }
@@ -230,15 +240,32 @@ fn handle_escape_seq() {
                     }
                 }
                 ArrowKey::Down => {
-                    if editor.cur_pos.y != editor.rows {
+                    if editor.cur_pos.y != editor.term_rows {
                         editor.cur_pos.y += 1;
                     }
                 }
+                ArrowKey::Home => {
+                    editor.cur_pos.x = 0;
+                }
+                ArrowKey::End => {
+                    editor.cur_pos.x = editor.term_cols;
+                }
+                ArrowKey::PageUp => {
+                    editor.cur_pos.y = 0;
+                }
+                ArrowKey::PageDown => {
+                    editor.cur_pos.y = editor.term_rows;
+                }
+                ArrowKey::Delete => {}
             };
 
             send_esc_seq(EscSeq::MoveCursor(editor.cur_pos));
         });
+
+        return Ok(movement);
     }
+
+    Err(Error::from(ErrorKind::InvalidData))
 }
 
 fn refresh_screen() {
@@ -252,13 +279,13 @@ fn draw_rows() {
     send_esc_seq(EscSeq::GotoStart);
     EDITOR.with(|e_ref| {
         let e = e_ref.borrow();
-        for idx in 0..e.rows {
+        for idx in 0..e.term_rows {
             send_esc_seq(EscSeq::ClearLine);
-            if idx == e.rows / 3 {
+            if idx == e.term_rows / 3 {
                 stdout_write(WELCOME_MESSAGE.as_bytes());
             } else {
                 stdout_write(b"~");
-                if idx < e.rows - 1 {
+                if idx < e.term_rows - 1 {
                     stdout_write(b"\r\n");
                 }
             }
