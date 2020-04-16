@@ -202,6 +202,7 @@ impl Editor {
         let mut append_buffer: Vec<u8> = Vec::new();
         append_buffer.append(&mut EscSeq::ClearLine.into());
         for idx in 0..=self.term_rows {
+            append_buffer.append(&mut EscSeq::ClearLine.into());
             if idx < self.rows.len() + self.row_offset {
                 let line = format!("{}", &self.rows[idx + self.row_offset]);
                 append_buffer.append(&mut line.as_bytes().to_vec())
@@ -213,7 +214,7 @@ impl Editor {
                 }
             }
 
-            if idx < self.term_rows - 1 {
+            if idx < self.term_rows + self.row_offset - 1 {
                 append_buffer.push(b'\r');
                 append_buffer.push(b'\n');
             }
