@@ -14,8 +14,8 @@ use termios::{
 
 #[derive(Copy, Clone, Default)]
 struct CursorPosition {
-    x: i16,
-    y: i16,
+    x: usize,
+    y: usize,
 }
 
 enum ArrowKey {
@@ -108,16 +108,17 @@ struct WindowSize {
     ws_ypxiel: c_short,
 }
 
+type Row = String;
+
 struct Editor {
     _mode: RawMode,
-    term_rows: i16,
-    term_cols: i16,
+    term_rows: usize,
+    term_cols: usize,
     cur_pos: CursorPosition,
+    row_offset: usize,
     file: Option<File>,
     rows: Vec<Row>,
 }
-
-type Row = String;
 
 impl Editor {
     fn new() -> Self {
@@ -128,9 +129,10 @@ impl Editor {
 
         Editor {
             _mode: mode,
-            term_rows: rows - 1,
-            term_cols: cols - 1,
-            cur_pos,
+            term_rows: (rows - 1) as usize,
+            term_cols: (cols - 1) as usize,
+            cur_pos: cur_pos,
+            row_offset: 0,
             rows: Default::default(),
             file: Default::default(),
         }
@@ -151,11 +153,15 @@ impl Editor {
             ArrowKey::Up => {
                 if self.cur_pos.y != 0 {
                     self.cur_pos.y -= 1;
+                } else if self.cur_pos.y == 0 && self.row_offset != 0 {
+                    self.row_offset -= 1;
                 }
             }
             ArrowKey::Down => {
                 if self.cur_pos.y != self.term_rows {
                     self.cur_pos.y += 1;
+                } else if self.cur_pos.y == self.term_rows {
+                    self.row_offset += 1;
                 }
             }
             ArrowKey::Home => {
@@ -180,7 +186,6 @@ impl Editor {
         use std::io::BufRead;
 
         if filename.as_ref().is_file() {
-            println!("Is File!\r\n");
             self.file = Some(File::open(filename)?);
             self.rows = io::BufReader::new(self.file.as_ref().unwrap())
                 .lines()
@@ -195,8 +200,8 @@ impl Editor {
         send_esc_seq(EscSeq::GotoStart);
         for idx in 0..self.term_rows {
             send_esc_seq(EscSeq::ClearLine);
-            if (idx as usize) < self.rows.len() {
-                stdout_write(format!("{}\r\n", &self.rows[idx as usize]));
+            if idx < self.rows.len() + self.row_offset {
+                stdout_write(format!("{}\r\n", &self.rows[idx + self.row_offset]));
             } else {
                 //send_esc_seq(EscSeq::ClearLine);
                 if idx == self.term_rows / 3 && self.rows.is_empty() {
@@ -241,11 +246,17 @@ fn main() -> io::Result<()> {
 
     refresh_screen();
     let args: Vec<String> = std::env::args().collect();
-    e.open(&args[1])?;
-    e.draw();
+
+    match args.get(1) {
+        None => {}
+        Some(filename) => e.open(filename)?,
+    }
+
+    //e.draw();
 
     let mut buff = [0; 1];
     while let len = io::stdin().read(&mut buff)? {
+        e.draw();
         if len != 0 {
             match handle_key(buff[0]) {
                 KeyPress::Quit => {
