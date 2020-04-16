@@ -1,15 +1,12 @@
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]
 
-use crate::EscSeq::GotoStart;
-use crate::KeyPress::Key;
 use nix::libc::{ioctl, TIOCGWINSZ};
-use nix::sys::socket::send;
-use nix::unistd::SysconfVar::MQ_OPEN_MAX;
-use std::cell::RefCell;
+use std::fs::File;
 use std::io::{self, Error, ErrorKind, Read, Write};
 use std::os::raw::c_short;
 use std::os::unix::prelude::*;
+use std::path::Path;
 use termios::{
     Termios, BRKINT, CS8, ECHO, ICANON, ICRNL, IEXTEN, INPCK, ISIG, ISTRIP, IXON, OPOST, TCSAFLUSH,
     VMIN, VTIME,
@@ -116,6 +113,7 @@ struct Editor {
     term_rows: i16,
     term_cols: i16,
     cur_pos: CursorPosition,
+    file: Option<File>,
     rows: Vec<Row>,
 }
 
@@ -128,19 +126,17 @@ impl Editor {
         let (rows, cols) = get_window_size().unwrap();
         let cur_pos = CursorPosition::default();
 
-        let mut content_rows: Vec<Row> = Default::default();
-        content_rows.push("Hello World".to_string());
-
         Editor {
             _mode: mode,
             term_rows: rows - 1,
             term_cols: cols - 1,
             cur_pos,
-            rows: content_rows,
+            rows: Default::default(),
+            file: Default::default(),
         }
     }
 
-    fn move_cursor(&mut self, ak: ArrowKey) {
+    fn move_cursor(&mut self, ak: &ArrowKey) {
         match ak {
             ArrowKey::Left => {
                 if self.cur_pos.x != 0 {
@@ -180,6 +176,21 @@ impl Editor {
         send_esc_seq(EscSeq::MoveCursor(self.cur_pos));
     }
 
+    fn open(&mut self, filename: impl AsRef<Path>) -> io::Result<()> {
+        use std::io::BufRead;
+
+        if filename.as_ref().is_file() {
+            println!("Is File!\r\n");
+            self.file = Some(File::open(filename)?);
+            self.rows = io::BufReader::new(self.file.as_ref().unwrap())
+                .lines()
+                .map(std::result::Result::unwrap)
+                .collect();
+        }
+
+        Ok(())
+    }
+
     fn draw(&self) {
         send_esc_seq(EscSeq::GotoStart);
         for idx in 0..self.term_rows {
@@ -188,7 +199,7 @@ impl Editor {
                 stdout_write(format!("{}\r\n", &self.rows[idx as usize]));
             } else {
                 //send_esc_seq(EscSeq::ClearLine);
-                if idx == self.term_rows / 3 {
+                if idx == self.term_rows / 3 && self.rows.is_empty() {
                     stdout_write(WELCOME_MESSAGE.as_bytes());
                 } else {
                     stdout_write(b"~");
@@ -229,12 +240,12 @@ fn main() -> io::Result<()> {
     let mut e = Editor::new();
 
     refresh_screen();
+    let args: Vec<String> = std::env::args().collect();
+    e.open(&args[1])?;
     e.draw();
-    //send_esc_seq(EscSeq::GotoStart);
 
     let mut buff = [0; 1];
-
-    while let len = io::stdin().read(&mut buff).unwrap() {
+    while let len = io::stdin().read(&mut buff)? {
         if len != 0 {
             match handle_key(buff[0]) {
                 KeyPress::Quit => {
@@ -245,12 +256,13 @@ fn main() -> io::Result<()> {
                 }
                 KeyPress::Refresh => {
                     refresh_screen();
+                    e.draw();
                 }
                 KeyPress::Escape => {
                     let ak = handle_escape_seq().unwrap();
-                    e.move_cursor(ak);
+                    e.move_cursor(&ak);
                 }
-                Key(_) => {}
+                KeyPress::Key(_) => {}
             }
         }
     }
@@ -263,7 +275,7 @@ fn handle_key(c: u8) -> KeyPress {
         KeyPress::Quit
     } else if c == ctrl_key('x') {
         KeyPress::Refresh
-    } else if c == 27 {
+    } else if c == b'\x1b' {
         KeyPress::Escape
     } else {
         KeyPress::Key(c)
@@ -274,17 +286,17 @@ fn handle_escape_seq() -> io::Result<ArrowKey> {
     let mut buffer = [0; 3];
 
     io::stdin().lock().read(&mut buffer).unwrap();
-    if buffer[0] == '[' as u8 {
-        let movement = match buffer[1] as char {
-            'A' => ArrowKey::Up,
-            'B' => ArrowKey::Down,
-            'C' => ArrowKey::Right,
-            'D' => ArrowKey::Left,
-            'H' => ArrowKey::Home,
-            'F' => ArrowKey::End,
-            '3' => ArrowKey::Delete,
-            '5' => ArrowKey::PageUp,
-            '6' => ArrowKey::PageDown,
+    if buffer[0] == b'[' {
+        let movement = match buffer[1] {
+            b'A' => ArrowKey::Up,
+            b'B' => ArrowKey::Down,
+            b'C' => ArrowKey::Right,
+            b'D' => ArrowKey::Left,
+            b'H' => ArrowKey::Home,
+            b'F' => ArrowKey::End,
+            b'3' => ArrowKey::Delete,
+            b'5' => ArrowKey::PageUp,
+            b'6' => ArrowKey::PageDown,
             _ => return Err(Error::from(ErrorKind::InvalidData)),
         };
 
