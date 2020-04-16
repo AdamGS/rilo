@@ -270,8 +270,11 @@ fn main() -> io::Result<()> {
                     e.draw();
                 }
                 KeyPress::Escape => {
-                    let ak = handle_escape_seq().unwrap();
-                    e.move_cursor(&ak);
+                    match handle_escape_seq() {
+                        Ok(ak) => {e.move_cursor(&ak);},
+                        Err(_) => {},
+                    };
+
                 }
                 KeyPress::Key(_) => {}
             }
