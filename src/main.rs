@@ -206,7 +206,6 @@ impl Editor {
                 let line = format!("{}", &self.rows[idx + self.row_offset]);
                 append_buffer.append(&mut line.as_bytes().to_vec())
             } else {
-                //send_esc_seq(EscSeq::ClearLine);
                 if idx == self.term_rows / 3 && self.rows.is_empty() {
                     append_buffer.append(&mut WELCOME_MESSAGE.as_bytes().to_vec());
                 } else {
@@ -219,8 +218,6 @@ impl Editor {
                 append_buffer.push(b'\n');
             }
             append_buffer.append(&mut EscSeq::ClearLine.into());
-
-
         }
 
         send_esc_seq(EscSeq::GotoStart);
@@ -251,7 +248,6 @@ fn get_window_size() -> io::Result<(i16, i16)> {
 }
 
 fn main() -> io::Result<()> {
-    // This is a hack to make the EDITOR to initilize, buy maybe everything should be a method of editor?
     let mut e = Editor::new();
 
     refresh_screen();
@@ -267,12 +263,10 @@ fn main() -> io::Result<()> {
     let mut buff = [0; 1];
     while let len = io::stdin().read(&mut buff)? {
         if len != 0 {
-
             match handle_key(buff[0]) {
                 KeyPress::Quit => {
                     send_esc_seq(EscSeq::ClearScreen);
                     send_esc_seq(EscSeq::GotoStart);
-                    // With impl_editor, the drop should work!
                     break;
                 }
                 KeyPress::Refresh => {
