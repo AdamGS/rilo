@@ -160,7 +160,9 @@ impl Editor {
             ArrowKey::Down => {
                 if self.cur_pos.y != self.term_rows {
                     self.cur_pos.y += 1;
-                } else if self.cur_pos.y == self.term_rows {
+                } else if self.cur_pos.y == self.term_rows
+                    && self.row_offset + self.term_rows + 1 != self.rows.len()
+                {
                     self.row_offset += 1;
                 }
             }
@@ -198,7 +200,7 @@ impl Editor {
 
     fn draw(&self) {
         send_esc_seq(EscSeq::GotoStart);
-        for idx in 0..self.term_rows {
+        for idx in 0..=self.term_rows {
             send_esc_seq(EscSeq::ClearLine);
             if idx < self.rows.len() + self.row_offset {
                 stdout_write(format!("{}\r\n", &self.rows[idx + self.row_offset]));
@@ -270,11 +272,9 @@ fn main() -> io::Result<()> {
                     e.draw();
                 }
                 KeyPress::Escape => {
-                    match handle_escape_seq() {
-                        Ok(ak) => {e.move_cursor(&ak);},
-                        Err(_) => {},
-                    };
-
+                    if let Ok(ak) = handle_escape_seq() {
+                        e.move_cursor(&ak)
+                    }
                 }
                 KeyPress::Key(_) => {}
             }
