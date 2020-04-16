@@ -200,12 +200,10 @@ impl Editor {
 
     fn draw(&self) {
         let mut append_buffer: Vec<u8> = Vec::new();
-        send_esc_seq(EscSeq::GotoStart);
-        send_esc_seq(EscSeq::ClearScreen);
+        append_buffer.append(&mut EscSeq::ClearLine.into());
         for idx in 0..=self.term_rows {
-            //send_esc_seq(EscSeq::ClearLine);
             if idx < self.rows.len() + self.row_offset {
-                let line = format!("{}\r\n", &self.rows[idx + self.row_offset]);
+                let line = format!("{}", &self.rows[idx + self.row_offset]);
                 append_buffer.append(&mut line.as_bytes().to_vec())
             } else {
                 //send_esc_seq(EscSeq::ClearLine);
@@ -213,16 +211,20 @@ impl Editor {
                     append_buffer.append(&mut WELCOME_MESSAGE.as_bytes().to_vec());
                 } else {
                     append_buffer.push(b'~');
-                    if idx < self.term_rows - 1 {
-                        append_buffer.push(b'\r');
-                        append_buffer.push(b'\n');
-                    }
                 }
             }
+
+            if idx < self.term_rows - 1 {
+                append_buffer.push(b'\r');
+                append_buffer.push(b'\n');
+            }
+            append_buffer.append(&mut EscSeq::ClearLine.into());
+
+
         }
 
+        send_esc_seq(EscSeq::GotoStart);
         stdout_write(append_buffer);
-
         send_esc_seq(EscSeq::MoveCursor(self.cur_pos));
     }
 }
@@ -239,10 +241,10 @@ fn get_window_size() -> io::Result<(i16, i16)> {
 
     let return_code = unsafe { ioctl(fd, TIOCGWINSZ, &mut winsize as *mut _) };
     if (return_code == -1) || (winsize.ws_col == 0) {
-        Error::new(
+        return Err(Error::new(
             ErrorKind::Other,
             "get_window_size: ioctl failed or returned invalid value",
-        );
+        ));
     }
 
     Ok((winsize.ws_row, winsize.ws_col))
@@ -260,12 +262,12 @@ fn main() -> io::Result<()> {
         Some(filename) => e.open(filename)?,
     }
 
-    //e.draw();
+    e.draw();
 
     let mut buff = [0; 1];
     while let len = io::stdin().read(&mut buff)? {
-        e.draw();
         if len != 0 {
+
             match handle_key(buff[0]) {
                 KeyPress::Quit => {
                     send_esc_seq(EscSeq::ClearScreen);
@@ -284,6 +286,8 @@ fn main() -> io::Result<()> {
                 }
                 KeyPress::Key(_) => {}
             }
+
+            e.draw();
         }
     }
 
