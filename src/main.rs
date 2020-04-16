@@ -199,23 +199,29 @@ impl Editor {
     }
 
     fn draw(&self) {
+        let mut append_buffer: Vec<u8> = Vec::new();
         send_esc_seq(EscSeq::GotoStart);
+        send_esc_seq(EscSeq::ClearScreen);
         for idx in 0..=self.term_rows {
-            send_esc_seq(EscSeq::ClearLine);
+            //send_esc_seq(EscSeq::ClearLine);
             if idx < self.rows.len() + self.row_offset {
-                stdout_write(format!("{}\r\n", &self.rows[idx + self.row_offset]));
+                let line = format!("{}\r\n", &self.rows[idx + self.row_offset]);
+                append_buffer.append(&mut line.as_bytes().to_vec())
             } else {
                 //send_esc_seq(EscSeq::ClearLine);
                 if idx == self.term_rows / 3 && self.rows.is_empty() {
-                    stdout_write(WELCOME_MESSAGE.as_bytes());
+                    append_buffer.append(&mut WELCOME_MESSAGE.as_bytes().to_vec());
                 } else {
-                    stdout_write(b"~");
+                    append_buffer.push(b'~');
                     if idx < self.term_rows - 1 {
-                        stdout_write(b"\r\n");
+                        append_buffer.push(b'\r');
+                        append_buffer.push(b'\n');
                     }
                 }
             }
         }
+
+        stdout_write(append_buffer);
 
         send_esc_seq(EscSeq::MoveCursor(self.cur_pos));
     }
