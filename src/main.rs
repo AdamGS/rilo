@@ -46,9 +46,9 @@ enum EscSeq {
     MoveCursor(CursorPosition),
 }
 
-impl Into<Vec<u8>> for EscSeq {
-    fn into(self) -> Vec<u8> {
-        match self {
+impl From<EscSeq> for Vec<u8> {
+    fn from(esc: EscSeq) -> Self {
+        match esc {
             EscSeq::ClearLine => b"\x1b[K".to_vec(),
             EscSeq::ClearScreen => b"\x1b[2J".to_vec(),
             EscSeq::GotoStart => b"\x1b[H".to_vec(),
@@ -62,8 +62,7 @@ impl Into<Vec<u8>> for EscSeq {
 }
 
 fn send_esc_seq(esc: EscSeq) {
-    let v: Vec<u8> = esc.into();
-    stdout_write(&v);
+    stdout_write(Vec::from(esc));
 }
 
 const WELCOME_MESSAGE: &str = "rilo Editor - version 0.0.1\r\n";
@@ -204,14 +203,12 @@ impl Editor {
         for idx in 0..=self.term_rows {
             append_buffer.append(&mut EscSeq::ClearLine.into());
             if idx < self.rows.len() + self.row_offset {
-                let line = format!("{}", &self.rows[idx + self.row_offset]);
+                let line = &self.rows[idx + self.row_offset];
                 append_buffer.append(&mut line.as_bytes().to_vec())
+            } else if idx == self.term_rows / 3 && self.rows.is_empty() {
+                append_buffer.append(&mut WELCOME_MESSAGE.as_bytes().to_vec());
             } else {
-                if idx == self.term_rows / 3 && self.rows.is_empty() {
-                    append_buffer.append(&mut WELCOME_MESSAGE.as_bytes().to_vec());
-                } else {
-                    append_buffer.push(b'~');
-                }
+                append_buffer.push(b'~');
             }
 
             if idx < self.term_rows + self.row_offset - 1 {
