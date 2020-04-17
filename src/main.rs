@@ -37,7 +37,7 @@ enum KeyPress {
     Key(u8),
 }
 
-enum EscSeq {
+enum CtrlSeq {
     ClearLine,
     ClearScreen,
     GotoStart,
@@ -46,23 +46,23 @@ enum EscSeq {
     MoveCursor(CursorPosition),
 }
 
-impl From<EscSeq> for Vec<u8> {
-    fn from(esc: EscSeq) -> Self {
-        match esc {
-            EscSeq::ClearLine => b"\x1b[K".to_vec(),
-            EscSeq::ClearScreen => b"\x1b[2J".to_vec(),
-            EscSeq::GotoStart => b"\x1b[H".to_vec(),
-            EscSeq::HideCursor => b"\x1b[?25l".to_vec(),
-            EscSeq::ShowCursor => b"\x1b[?25h".to_vec(),
-            EscSeq::MoveCursor(cp) => format!("\x1b[{};{}H", cp.y + 1, cp.x + 1)
+impl From<CtrlSeq> for Vec<u8> {
+    fn from(ctrl: CtrlSeq) -> Self {
+        match ctrl {
+            CtrlSeq::ClearLine => b"\x1b[K".to_vec(),
+            CtrlSeq::ClearScreen => b"\x1b[2J".to_vec(),
+            CtrlSeq::GotoStart => b"\x1b[H".to_vec(),
+            CtrlSeq::HideCursor => b"\x1b[?25l".to_vec(),
+            CtrlSeq::ShowCursor => b"\x1b[?25h".to_vec(),
+            CtrlSeq::MoveCursor(cp) => format!("\x1b[{};{}H", cp.y + 1, cp.x + 1)
                 .as_bytes()
                 .to_vec(),
         }
     }
 }
 
-fn send_esc_seq(esc: EscSeq) {
-    stdout_write(Vec::from(esc));
+fn send_esc_seq(ctrl: CtrlSeq) {
+    stdout_write(Vec::from(ctrl));
 }
 
 const WELCOME_MESSAGE: &str = "rilo Editor - version 0.0.1\r\n";
@@ -110,7 +110,7 @@ struct WindowSize {
 type Row = String;
 
 struct Editor {
-    _mode: RawMode,
+    mode: RawMode,
     term_rows: usize,
     term_cols: usize,
     cur_pos: CursorPosition,
@@ -127,10 +127,10 @@ impl Editor {
         let cur_pos = CursorPosition::default();
 
         Editor {
-            _mode: mode,
+            mode,
+            cur_pos,
             term_rows: (rows - 1) as usize,
             term_cols: (cols - 1) as usize,
-            cur_pos: cur_pos,
             row_offset: 0,
             rows: Default::default(),
             file: Default::default(),
@@ -180,7 +180,7 @@ impl Editor {
             ArrowKey::Delete => {}
         };
 
-        send_esc_seq(EscSeq::MoveCursor(self.cur_pos));
+        send_esc_seq(CtrlSeq::MoveCursor(self.cur_pos));
     }
 
     fn open(&mut self, filename: impl AsRef<Path>) -> io::Result<()> {
@@ -199,9 +199,9 @@ impl Editor {
 
     fn draw(&self) {
         let mut append_buffer: Vec<u8> = Vec::new();
-        append_buffer.append(&mut EscSeq::ClearLine.into());
+        append_buffer.append(&mut CtrlSeq::ClearLine.into());
         for idx in 0..=self.term_rows {
-            append_buffer.append(&mut EscSeq::ClearLine.into());
+            append_buffer.append(&mut CtrlSeq::ClearLine.into());
             if idx < self.rows.len() + self.row_offset {
                 let line = &self.rows[idx + self.row_offset];
                 append_buffer.append(&mut line.as_bytes().to_vec())
@@ -215,18 +215,18 @@ impl Editor {
                 append_buffer.push(b'\r');
                 append_buffer.push(b'\n');
             }
-            append_buffer.append(&mut EscSeq::ClearLine.into());
+            append_buffer.append(&mut CtrlSeq::ClearLine.into());
         }
 
-        send_esc_seq(EscSeq::GotoStart);
+        send_esc_seq(CtrlSeq::GotoStart);
         stdout_write(append_buffer);
-        send_esc_seq(EscSeq::MoveCursor(self.cur_pos));
+        send_esc_seq(CtrlSeq::MoveCursor(self.cur_pos));
     }
 }
 
 impl Drop for Editor {
     fn drop(&mut self) {
-        termios::tcsetattr(io::stdin().as_raw_fd(), TCSAFLUSH, &self._mode.inner).unwrap();
+        termios::tcsetattr(io::stdin().as_raw_fd(), TCSAFLUSH, &self.mode.inner).unwrap();
     }
 }
 
@@ -251,6 +251,7 @@ fn main() -> io::Result<()> {
     refresh_screen();
     let args: Vec<String> = std::env::args().collect();
 
+    // TODO: Change to clap or another library to handle command line arguments
     match args.get(1) {
         None => {}
         Some(filename) => e.open(filename)?,
@@ -263,8 +264,8 @@ fn main() -> io::Result<()> {
         if len != 0 {
             match handle_key(buff[0]) {
                 KeyPress::Quit => {
-                    send_esc_seq(EscSeq::ClearScreen);
-                    send_esc_seq(EscSeq::GotoStart);
+                    send_esc_seq(CtrlSeq::ClearScreen);
+                    send_esc_seq(CtrlSeq::GotoStart);
                     break;
                 }
                 KeyPress::Refresh => {
@@ -273,7 +274,7 @@ fn main() -> io::Result<()> {
                 }
                 KeyPress::Escape => {
                     if let Ok(ak) = handle_escape_seq() {
-                        e.move_cursor(&ak)
+                        e.move_cursor(&ak);
                     }
                 }
                 KeyPress::Key(_) => {}
@@ -323,7 +324,7 @@ fn handle_escape_seq() -> io::Result<ArrowKey> {
 }
 
 fn refresh_screen() {
-    send_esc_seq(EscSeq::HideCursor);
-    send_esc_seq(EscSeq::ClearScreen);
-    send_esc_seq(EscSeq::ShowCursor);
+    send_esc_seq(CtrlSeq::HideCursor);
+    send_esc_seq(CtrlSeq::ClearScreen);
+    send_esc_seq(CtrlSeq::ShowCursor);
 }
