@@ -12,12 +12,14 @@ use termios::{
     VMIN, VTIME,
 };
 
+/// The cursor's position, **inside** the terminal.
 #[derive(Copy, Clone, Default)]
 struct CursorPosition {
     x: usize,
     y: usize,
 }
 
+/// An enum representing a navigation key press
 enum ArrowKey {
     Left,
     Right,
@@ -37,12 +39,19 @@ enum KeyPress {
     Key(u8),
 }
 
+/// Various commands we might issue to the terminal
 enum CtrlSeq {
+    /// Clears the entire line
     ClearLine,
+    /// Clears the entire screen, appropriate before either drawing or quitting rilo
     ClearScreen,
+    /// A shortcut to go the start of the terminal (0, 0)
     GotoStart,
+    /// Hides the cursor, useful to prevent flashing
     HideCursor,
+    /// Displays the cursor after we hide it
     ShowCursor,
+    /// Moves the cursor to a position in the terminal
     MoveCursor(CursorPosition),
 }
 
@@ -61,6 +70,7 @@ impl From<CtrlSeq> for Vec<u8> {
     }
 }
 
+/// Send an escape sequence to the actual terminal
 fn send_esc_seq(ctrl: CtrlSeq) {
     stdout_write(Vec::from(ctrl));
 }
@@ -71,6 +81,23 @@ fn ctrl_key(c: char) -> u8 {
     c as u8 & 0x1f
 }
 
+/// Gets terminal size as (X, Y) tuple. **Note:** libc returns a value in the  [1..N] range,
+fn get_window_size() -> io::Result<(i16, i16)> {
+    let fd = io::stdin().as_raw_fd();
+    let mut winsize = WindowSize::default();
+
+    let return_code = unsafe { ioctl(fd, TIOCGWINSZ, &mut winsize as *mut _) };
+    if (return_code == -1) || (winsize.ws_col == 0) {
+        Err(Error::new(
+            ErrorKind::Other,
+            "get_window_size: ioctl failed or returned invalid value",
+        ))
+    } else {
+        Ok((winsize.ws_row, winsize.ws_col))
+    }
+}
+
+/// A helper function to write data into stdout
 fn stdout_write(buff: impl AsRef<[u8]>) {
     io::stdout().lock().write_all(buff.as_ref()).unwrap();
     io::stdout().lock().flush().unwrap();
@@ -95,6 +122,12 @@ impl RawMode {
 
         termios::tcsetattr(fd, TCSAFLUSH, &term).unwrap();
         raw_mode
+    }
+}
+
+impl Drop for RawMode {
+    fn drop(&mut self) {
+        termios::tcsetattr(io::stdin().as_raw_fd(), TCSAFLUSH, &self.inner).unwrap();
     }
 }
 
@@ -123,7 +156,7 @@ impl Editor {
     fn new() -> Self {
         let mode = RawMode::enable_raw_mode();
 
-        let (rows, cols) = get_window_size().unwrap();
+        let (rows, cols) = get_window_size().expect("Couldn't get window size from terminal.");
         let cur_pos = CursorPosition::default();
 
         Editor {
@@ -137,6 +170,7 @@ impl Editor {
         }
     }
 
+    /// Handles both the internal state held in the Editor, and moves the cursor on the terminal
     fn move_cursor(&mut self, ak: &ArrowKey) {
         match ak {
             ArrowKey::Left => {
@@ -183,6 +217,7 @@ impl Editor {
         send_esc_seq(CtrlSeq::MoveCursor(self.cur_pos));
     }
 
+    /// Open a file to edit/read
     fn open(&mut self, filename: impl AsRef<Path>) -> io::Result<()> {
         use std::io::BufRead;
 
@@ -197,7 +232,9 @@ impl Editor {
         Ok(())
     }
 
+    /// Draws out the current state held in the editor to the terminal
     fn draw(&self) {
+        // We use a Vec we can push all the data on screen into, and then write it in one go into stdout
         let mut append_buffer: Vec<u8> = Vec::new();
         append_buffer.append(&mut CtrlSeq::ClearLine.into());
         for idx in 0..=self.term_rows {
@@ -224,37 +261,15 @@ impl Editor {
     }
 }
 
-impl Drop for Editor {
-    fn drop(&mut self) {
-        termios::tcsetattr(io::stdin().as_raw_fd(), TCSAFLUSH, &self.mode.inner).unwrap();
-    }
-}
-
-fn get_window_size() -> io::Result<(i16, i16)> {
-    let fd = io::stdin().as_raw_fd();
-    let mut winsize = WindowSize::default();
-
-    let return_code = unsafe { ioctl(fd, TIOCGWINSZ, &mut winsize as *mut _) };
-    if (return_code == -1) || (winsize.ws_col == 0) {
-        return Err(Error::new(
-            ErrorKind::Other,
-            "get_window_size: ioctl failed or returned invalid value",
-        ));
-    }
-
-    Ok((winsize.ws_row, winsize.ws_col))
-}
-
 fn main() -> io::Result<()> {
     let mut e = Editor::new();
 
     refresh_screen();
     let args: Vec<String> = std::env::args().collect();
 
-    // TODO: Change to clap or another library to handle command line arguments
-    match args.get(1) {
-        None => {}
-        Some(filename) => e.open(filename)?,
+    // TODO: Change to clap or another library that handles command line arguments
+    if let Some(filename) = args.get(1) {
+        e.open(filename)?
     }
 
     e.draw();
@@ -317,10 +332,10 @@ fn handle_escape_seq() -> io::Result<ArrowKey> {
             _ => return Err(Error::from(ErrorKind::InvalidData)),
         };
 
-        return Ok(movement);
+        Ok(movement)
+    } else {
+        Err(Error::from(ErrorKind::InvalidData))
     }
-
-    Err(Error::from(ErrorKind::InvalidData))
 }
 
 fn refresh_screen() {
