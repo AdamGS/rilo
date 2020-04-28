@@ -2,6 +2,7 @@
 #![warn(clippy::pedantic)]
 
 use nix::libc::{ioctl, TIOCGWINSZ};
+use std::cmp::Ordering;
 use std::fs::File;
 use std::io::{self, Error, ErrorKind, Read, Write};
 use std::os::raw::c_short;
@@ -148,6 +149,7 @@ struct Editor {
     term_cols: usize,
     cur_pos: CursorPosition,
     row_offset: usize,
+    col_offset: usize,
     file: Option<File>,
     rows: Vec<Row>,
 }
@@ -165,6 +167,7 @@ impl Editor {
             term_rows: (rows - 1) as usize,
             term_cols: (cols - 1) as usize,
             row_offset: 0,
+            col_offset: 0,
             rows: Default::default(),
             file: Default::default(),
         }
@@ -176,11 +179,18 @@ impl Editor {
             ArrowKey::Left => {
                 if self.cur_pos.x != 0 {
                     self.cur_pos.x -= 1;
+                } else if self.cur_pos.x == 0 && self.col_offset != 0 {
+                    self.col_offset -= 1;
                 }
             }
             ArrowKey::Right => {
-                if self.cur_pos.x != self.term_cols {
+                let current_line = self.current_line();
+                if self.cur_pos.x == current_line.len() {
+                    // Do Nothing!
+                } else if self.cur_pos.x != self.term_cols {
                     self.cur_pos.x += 1;
+                } else if self.cur_pos.x == self.term_cols {
+                    self.col_offset += 1;
                 }
             }
             ArrowKey::Up => {
@@ -189,27 +199,49 @@ impl Editor {
                 } else if self.cur_pos.y == 0 && self.row_offset != 0 {
                     self.row_offset -= 1;
                 }
+
+                let next_line = self.current_line();
+                if self.cur_pos.x > next_line.len() {
+                    self.cur_pos.x = next_line.len();
+                }
             }
             ArrowKey::Down => {
                 if self.cur_pos.y != self.term_rows {
                     self.cur_pos.y += 1;
                 } else if self.cur_pos.y == self.term_rows
-                    && self.row_offset + self.term_rows + 1 != self.rows.len()
+                    && self.row_offset + self.term_rows != self.rows.len()
                 {
                     self.row_offset += 1;
+                }
+
+                let next_line = self.current_line();
+                if self.cur_pos.x > next_line.len() {
+                    self.cur_pos.x = next_line.len();
                 }
             }
             ArrowKey::Home => {
                 self.cur_pos.x = 0;
             }
             ArrowKey::End => {
-                self.cur_pos.x = self.term_cols;
+                let current_line = self.current_line();
+                self.cur_pos.x = match self.term_cols.cmp(&current_line.len()) {
+                    Ordering::Greater | Ordering::Equal => current_line.len(),
+                    Ordering::Less => 3, //TODO: Figure out correct behavior
+                };
             }
             ArrowKey::PageUp => {
                 self.cur_pos.y = 0;
+                let next_line = self.current_line();
+                if self.cur_pos.x > next_line.len() {
+                    self.cur_pos.x = next_line.len();
+                }
             }
             ArrowKey::PageDown => {
                 self.cur_pos.y = self.term_rows;
+                let next_line = self.current_line();
+                if self.cur_pos.x > next_line.len() {
+                    self.cur_pos.x = next_line.len();
+                }
             }
             ArrowKey::Delete => {}
         };
@@ -237,27 +269,43 @@ impl Editor {
         // We use a Vec we can push all the data on screen into, and then write it in one go into stdout
         let mut append_buffer: Vec<u8> = Vec::new();
         append_buffer.append(&mut CtrlSeq::ClearLine.into());
-        for idx in 0..=self.term_rows {
-            append_buffer.append(&mut CtrlSeq::ClearLine.into());
-            if idx < self.rows.len() + self.row_offset {
-                let line = &self.rows[idx + self.row_offset];
+        for idx in self.row_offset..=self.term_rows + self.row_offset {
+            //if idx < self.rows.len() + self.row_offset {
+            let line = &self.rows[idx];
+            if line.len() > self.col_offset {
+                let range = if line.len() < self.term_cols {
+                    self.col_offset..line.len()
+                } else if line.len() > self.col_offset + self.term_cols {
+                    self.col_offset..self.col_offset + self.term_cols
+                } else {
+                    self.col_offset..line.len()
+                };
+                let line = line[range].to_string();
                 append_buffer.append(&mut line.as_bytes().to_vec())
-            } else if idx == self.term_rows / 3 && self.rows.is_empty() {
-                append_buffer.append(&mut WELCOME_MESSAGE.as_bytes().to_vec());
-            } else {
-                append_buffer.push(b'~');
             }
+            // } else if idx == self.term_rows / 3 && self.rows.is_empty() {
+            //     append_buffer.append(&mut WELCOME_MESSAGE.as_bytes().to_vec());
+            // } else {
+            //     append_buffer.push(b'~');
+            // }
 
-            if idx < self.term_rows + self.row_offset - 1 {
+            if idx < self.term_rows + self.row_offset {
                 append_buffer.push(b'\r');
                 append_buffer.push(b'\n');
+                append_buffer.append(&mut CtrlSeq::ClearLine.into());
             }
-            append_buffer.append(&mut CtrlSeq::ClearLine.into());
         }
 
+        send_esc_seq(CtrlSeq::HideCursor);
         send_esc_seq(CtrlSeq::GotoStart);
         stdout_write(append_buffer);
         send_esc_seq(CtrlSeq::MoveCursor(self.cur_pos));
+        send_esc_seq(CtrlSeq::ShowCursor);
+    }
+
+    fn current_line(&self) -> &Row {
+        let current_line_idx = self.row_offset + self.cur_pos.y;
+        self.rows.get(current_line_idx).unwrap()
     }
 }
 
