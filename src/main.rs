@@ -181,16 +181,21 @@ impl Editor {
                     self.cur_pos.x -= 1;
                 } else if self.cur_pos.x == 0 && self.col_offset != 0 {
                     self.col_offset -= 1;
+                } else if self.cur_pos.x == 0 && self.col_offset == 0 {
+                    // TODO: Go to the end of the previous line
                 }
             }
             ArrowKey::Right => {
-                let current_line = self.current_line();
-                if self.cur_pos.x == current_line.len() {
-                    // Do Nothing!
-                } else if self.cur_pos.x != self.term_cols {
-                    self.cur_pos.x += 1;
-                } else if self.cur_pos.x == self.term_cols {
-                    self.col_offset += 1;
+                if let Some(current_line) = self.current_line() {
+                    if self.cur_pos.x == current_line.len() {
+                        self.cur_pos.x = 0;
+                        self.cur_pos.y += 1;
+                        self.col_offset = 0;
+                    } else if self.cur_pos.x != self.term_cols {
+                        self.cur_pos.x += 1;
+                    } else if self.cur_pos.x == self.term_cols {
+                        self.col_offset += 1;
+                    }
                 }
             }
             ArrowKey::Up => {
@@ -200,47 +205,58 @@ impl Editor {
                     self.row_offset -= 1;
                 }
 
-                let next_line = self.current_line();
-                if self.cur_pos.x > next_line.len() {
-                    self.cur_pos.x = next_line.len();
+                if let Some(next_line) = self.current_line() {
+                    if self.cur_pos.x > next_line.len() {
+                        self.cur_pos.x = next_line.len();
+                    }
                 }
             }
             ArrowKey::Down => {
-                if self.cur_pos.y != self.term_rows {
-                    self.cur_pos.y += 1;
-                } else if self.cur_pos.y == self.term_rows
-                    && self.row_offset + self.term_rows != self.rows.len()
-                {
-                    self.row_offset += 1;
-                }
+                let file_length = self.rows.len();
+                if self.row_offset + self.cur_pos.y != file_length {
+                    if self.cur_pos.y != self.term_rows {
+                        self.cur_pos.y += 1;
+                    } else if self.cur_pos.y == self.term_rows
+                        && self.row_offset + self.term_rows != self.rows.len()
+                    {
+                        self.row_offset += 1;
+                    }
 
-                let next_line = self.current_line();
-                if self.cur_pos.x > next_line.len() {
-                    self.cur_pos.x = next_line.len();
+                    if let Some(next_line) = self.current_line() {
+                        if self.cur_pos.x > next_line.len() {
+                            self.cur_pos.x = next_line.len();
+                        }
+                    }
                 }
             }
             ArrowKey::Home => {
                 self.cur_pos.x = 0;
+                self.col_offset = 0;
             }
             ArrowKey::End => {
-                let current_line = self.current_line();
-                self.cur_pos.x = match self.term_cols.cmp(&current_line.len()) {
-                    Ordering::Greater | Ordering::Equal => current_line.len(),
-                    Ordering::Less => 3, //TODO: Figure out correct behavior
+                let current_line_len = self.current_line().unwrap().len();
+                self.cur_pos.x = match self.term_cols.cmp(&current_line_len) {
+                    Ordering::Greater | Ordering::Equal => current_line_len,
+                    Ordering::Less => {
+                        self.col_offset = current_line_len - self.term_cols;
+                        self.term_cols
+                    }
                 };
             }
             ArrowKey::PageUp => {
                 self.cur_pos.y = 0;
-                let next_line = self.current_line();
-                if self.cur_pos.x > next_line.len() {
-                    self.cur_pos.x = next_line.len();
+                if let Some(next_line) = self.current_line() {
+                    if self.cur_pos.x > next_line.len() {
+                        self.cur_pos.x = next_line.len();
+                    }
                 }
             }
             ArrowKey::PageDown => {
                 self.cur_pos.y = self.term_rows;
-                let next_line = self.current_line();
-                if self.cur_pos.x > next_line.len() {
-                    self.cur_pos.x = next_line.len();
+                if let Some(next_line) = self.current_line() {
+                    if self.cur_pos.x > next_line.len() {
+                        self.cur_pos.x = next_line.len();
+                    }
                 }
             }
             ArrowKey::Delete => {}
@@ -270,24 +286,22 @@ impl Editor {
         let mut append_buffer: Vec<u8> = Vec::new();
         append_buffer.append(&mut CtrlSeq::ClearLine.into());
         for idx in self.row_offset..=self.term_rows + self.row_offset {
-            //if idx < self.rows.len() + self.row_offset {
-            let line = &self.rows[idx];
-            if line.len() > self.col_offset {
-                let range = if line.len() < self.term_cols {
-                    self.col_offset..line.len()
-                } else if line.len() > self.col_offset + self.term_cols {
-                    self.col_offset..self.col_offset + self.term_cols
-                } else {
-                    self.col_offset..line.len()
-                };
-                let line = line[range].to_string();
-                append_buffer.append(&mut line.as_bytes().to_vec())
+            if idx < self.rows.len() {
+                let line = &self.rows[idx];
+                if line.len() > self.col_offset {
+                    let range = if line.len() < self.term_cols {
+                        self.col_offset..line.len()
+                    } else if line.len() > self.col_offset + self.term_cols {
+                        self.col_offset..self.col_offset + self.term_cols
+                    } else {
+                        self.col_offset..line.len()
+                    };
+                    let line = line[range].to_string();
+                    append_buffer.append(&mut line.as_bytes().to_vec())
+                }
+            } else {
+                append_buffer.push(b'~');
             }
-            // } else if idx == self.term_rows / 3 && self.rows.is_empty() {
-            //     append_buffer.append(&mut WELCOME_MESSAGE.as_bytes().to_vec());
-            // } else {
-            //     append_buffer.push(b'~');
-            // }
 
             if idx < self.term_rows + self.row_offset {
                 append_buffer.push(b'\r');
@@ -303,9 +317,9 @@ impl Editor {
         send_esc_seq(CtrlSeq::ShowCursor);
     }
 
-    fn current_line(&self) -> &Row {
+    fn current_line(&self) -> Option<&Row> {
         let current_line_idx = self.row_offset + self.cur_pos.y;
-        self.rows.get(current_line_idx).unwrap()
+        self.rows.get(current_line_idx)
     }
 }
 
