@@ -76,8 +76,6 @@ fn send_esc_seq(ctrl: CtrlSeq) {
     stdout_write(Vec::from(ctrl));
 }
 
-const WELCOME_MESSAGE: &str = "rilo Editor - version 0.0.1\r\n";
-
 fn ctrl_key(c: char) -> u8 {
     c as u8 & 0x1f
 }
@@ -116,7 +114,7 @@ impl RawMode {
 
         term.c_iflag &= !(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
         term.c_oflag &= !(OPOST);
-        term.c_cflag |= (CS8);
+        term.c_cflag |= CS8;
         term.c_lflag &= !(ECHO | ICANON | IEXTEN | ISIG);
         term.c_cc[VMIN] = 0;
         term.c_cc[VTIME] = 1;
@@ -144,7 +142,7 @@ struct WindowSize {
 type Row = String;
 
 struct Editor {
-    mode: RawMode,
+    _mode: RawMode,
     term_rows: usize,
     term_cols: usize,
     cur_pos: CursorPosition,
@@ -159,17 +157,16 @@ impl Editor {
         let mode = RawMode::enable_raw_mode();
 
         let (rows, cols) = get_window_size().expect("Couldn't get window size from terminal.");
-        let cur_pos = CursorPosition::default();
 
         Editor {
-            mode,
-            cur_pos,
+            _mode: mode,
             term_rows: (rows - 1) as usize,
             term_cols: (cols - 1) as usize,
+            cur_pos: Default::default(),
             row_offset: 0,
             col_offset: 0,
-            rows: Default::default(),
             file: Default::default(),
+            rows: Default::default(),
         }
     }
 
@@ -189,8 +186,13 @@ impl Editor {
                 if let Some(current_line) = self.current_line() {
                     if self.cur_pos.x == current_line.len() {
                         self.cur_pos.x = 0;
-                        self.cur_pos.y += 1;
                         self.col_offset = 0;
+
+                        if self.cur_pos.y == self.term_rows {
+                            self.row_offset += 1
+                        } else {
+                            self.cur_pos.y += 1;
+                        }
                     } else if self.cur_pos.x != self.term_cols {
                         self.cur_pos.x += 1;
                     } else if self.cur_pos.x == self.term_cols {
@@ -337,8 +339,8 @@ fn main() -> io::Result<()> {
     e.draw();
 
     let mut buff = [0; 1];
-    while let len = io::stdin().read(&mut buff)? {
-        if len != 0 {
+    loop {
+        if io::stdin().read(&mut buff)? != 0 {
             match handle_key(buff[0]) {
                 KeyPress::Quit => {
                     send_esc_seq(CtrlSeq::ClearScreen);
