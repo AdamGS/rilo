@@ -148,6 +148,7 @@ struct Editor {
     cur_pos: CursorPosition,
     row_offset: usize,
     col_offset: usize,
+    tab_size: u8,
     file: Option<File>,
     rows: Vec<Row>,
 }
@@ -162,9 +163,10 @@ impl Editor {
             _mode: mode,
             term_rows: (rows - 1) as usize,
             term_cols: (cols - 1) as usize,
-            cur_pos: Default::default(),
+            cur_pos: CursorPosition::default(),
             row_offset: 0,
             col_offset: 0,
+            tab_size: 4,
             file: Default::default(),
             rows: Default::default(),
         }
@@ -179,7 +181,24 @@ impl Editor {
                 } else if self.cur_pos.x == 0 && self.col_offset != 0 {
                     self.col_offset -= 1;
                 } else if self.cur_pos.x == 0 && self.col_offset == 0 {
-                    // TODO: Go to the end of the previous line
+                    if self.cur_pos.y == 0 && self.row_offset != 0 {
+                        self.row_offset -= 1;
+                    } else if !(self.cur_pos.y == 0 && self.row_offset == 0) {
+                        self.cur_pos.y -= 1;
+                    }
+
+                    if !(self.row_offset == 0 && self.cur_pos.y == 0) {
+                        if let Some(current_line) = self.current_line() {
+                            let line_length = current_line.len();
+                            if line_length > self.term_cols {
+                                self.col_offset = line_length - self.term_cols;
+                                self.cur_pos.x = self.term_cols;
+                            } else {
+                                self.col_offset = 0;
+                                self.cur_pos.x = line_length;
+                            }
+                        }
+                    }
                 }
             }
             ArrowKey::Right => {
@@ -298,8 +317,9 @@ impl Editor {
                     } else {
                         self.col_offset..line.len()
                     };
-                    let line = line[range].to_string();
-                    append_buffer.append(&mut line.as_bytes().to_vec())
+                    let ranged_line = line[range].to_string();
+                    let mut rendered_line = render_row(&ranged_line, self.tab_size);
+                    append_buffer.append(&mut rendered_line)
                 }
             } else {
                 append_buffer.push(b'~');
@@ -406,4 +426,13 @@ fn refresh_screen() {
     send_esc_seq(CtrlSeq::HideCursor);
     send_esc_seq(CtrlSeq::ClearScreen);
     send_esc_seq(CtrlSeq::ShowCursor);
+}
+
+fn render_row(row: &str, tab_size: u8) -> Vec<u8> {
+    row.chars()
+        .flat_map(|c| match c.cmp(&'\t') {
+            Ordering::Equal => vec![b' '; tab_size.into()],
+            _ => vec![c as u8],
+        })
+        .collect::<Vec<_>>()
 }
