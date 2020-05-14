@@ -146,6 +146,7 @@ struct Editor {
     term_rows: usize,
     term_cols: usize,
     cur_pos: CursorPosition,
+    rx: usize,
     row_offset: usize,
     col_offset: usize,
     tab_size: u8,
@@ -164,6 +165,7 @@ impl Editor {
             term_rows: (rows - 1) as usize,
             term_cols: (cols - 1) as usize,
             cur_pos: CursorPosition::default(),
+            rx: 0,
             row_offset: 0,
             col_offset: 0,
             tab_size: 4,
@@ -203,7 +205,7 @@ impl Editor {
             }
             ArrowKey::Right => {
                 if let Some(current_line) = self.current_line() {
-                    if self.cur_pos.x == current_line.len() {
+                    if self.cur_pos.x == current_line.len() || self.cur_pos.x + self.col_offset == current_line.len() {
                         self.cur_pos.x = 0;
                         self.col_offset = 0;
 
@@ -283,7 +285,18 @@ impl Editor {
             ArrowKey::Delete => {}
         };
 
-        send_esc_seq(CtrlSeq::MoveCursor(self.cur_pos));
+        // Render correct rx
+        if let Some(curr_line) = self.current_line() {
+            self.rx = cx_to_rx(curr_line, self.cur_pos.x);
+        } else {
+            self.rx = 0;
+        }
+
+
+        send_esc_seq(CtrlSeq::MoveCursor(CursorPosition {
+            x: self.rx,
+            y: self.cur_pos.y,
+        }));
     }
 
     /// Open a file to edit/read
@@ -335,7 +348,10 @@ impl Editor {
         send_esc_seq(CtrlSeq::HideCursor);
         send_esc_seq(CtrlSeq::GotoStart);
         stdout_write(append_buffer);
-        send_esc_seq(CtrlSeq::MoveCursor(self.cur_pos));
+        send_esc_seq(CtrlSeq::MoveCursor(CursorPosition {
+            x: self.rx,
+            y: self.cur_pos.y
+        }));
         send_esc_seq(CtrlSeq::ShowCursor);
     }
 
@@ -343,6 +359,21 @@ impl Editor {
         let current_line_idx = self.row_offset + self.cur_pos.y;
         self.rows.get(current_line_idx)
     }
+}
+
+fn cx_to_rx(line: &str, cx: usize) -> usize {
+    let relevent_slice = &line[0..cx];
+    let mut rx = 0;
+
+    for c in relevent_slice.chars() {
+        if c == '\t' {
+            rx += 4;
+        } else {
+            rx += 1;
+        }
+    }
+
+    rx
 }
 
 fn main() -> io::Result<()> {
