@@ -212,13 +212,15 @@ impl Editor {
                     if self.cur_pos.x == current_line.len()
                         || self.cur_pos.x + self.col_offset == current_line.len()
                     {
-                        self.cur_pos.x = 0;
-                        self.col_offset = 0;
+                        if self.cur_pos.y + self.row_offset != self.rows.len() - 1 {
+                            self.cur_pos.x = 0;
+                            self.col_offset = 0;
 
-                        if self.cur_pos.y == self.term_rows {
-                            self.row_offset += 1
-                        } else {
-                            self.cur_pos.y += 1;
+                            if self.cur_pos.y == self.term_rows {
+                                self.row_offset += 1
+                            } else {
+                                self.cur_pos.y += 1;
+                            }
                         }
                     } else if self.cur_pos.x != self.term_cols {
                         self.cur_pos.x += 1;
@@ -241,7 +243,7 @@ impl Editor {
                 }
             }
             ArrowKey::Down => {
-                let file_length = self.rows.len();
+                let file_length = self.rows.len() - 1;
                 if self.row_offset + self.cur_pos.y != file_length {
                     if self.cur_pos.y != self.term_rows {
                         self.cur_pos.y += 1;
@@ -375,7 +377,7 @@ impl Editor {
             Some(_) => {
                 v.append(&mut b"[Open File!]    ".to_vec());
                 let current_line_idx = self.cur_pos.y + self.row_offset;
-                let precenteges = current_line_idx * 100 / self.rows.len();
+                let precenteges = (current_line_idx + 1) * 100 / self.rows.len();
                 let lines = format!("{}/{}", current_line_idx + 1, self.rows.len());
                 v.append(&mut lines.as_bytes().to_vec());
                 let foramated = format!("    {}%", precenteges);
