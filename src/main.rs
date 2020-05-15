@@ -13,6 +13,8 @@ use termios::{
     VMIN, VTIME,
 };
 
+use std::time::Instant;
+
 /// The cursor's position, **inside** the terminal.
 #[derive(Copy, Clone, Default)]
 struct CursorPosition {
@@ -143,6 +145,20 @@ struct WindowSize {
     ws_ypxiel: c_short,
 }
 
+struct SystemMessage {
+    message: Option<String>,
+    time: Instant,
+}
+
+impl Default for SystemMessage {
+    fn default() -> Self {
+        SystemMessage {
+            message: None,
+            time: Instant::now(),
+        }
+    }
+}
+
 type Row = String;
 
 struct Editor {
@@ -156,6 +172,7 @@ struct Editor {
     tab_size: u8,
     file: Option<File>,
     rows: Vec<Row>,
+    message: SystemMessage,
 }
 
 impl Editor {
@@ -175,6 +192,7 @@ impl Editor {
             tab_size: 4,
             file: Default::default(),
             rows: Default::default(),
+            message: SystemMessage::default(),
         }
     }
 
@@ -375,15 +393,24 @@ impl Editor {
         match self.file {
             None => v.append(&mut b"[No open file]".to_vec()),
             Some(_) => {
-                v.append(&mut b"[Open File!]    ".to_vec());
+                v.append(&mut b"[Open File!]        ".to_vec());
                 let current_line_idx = self.cur_pos.y + self.row_offset;
                 let precenteges = (current_line_idx + 1) * 100 / self.rows.len();
                 let lines = format!("{}/{}", current_line_idx + 1, self.rows.len());
                 v.append(&mut lines.as_bytes().to_vec());
-                let foramated = format!("    {}%", precenteges);
+                let foramated = format!("        {}%", precenteges);
                 v.append(&mut foramated.as_bytes().to_vec());
+
+                use std::time::Duration;
+                if let Some(message) = &self.message.message {
+                    if self.message.time.elapsed() < Duration::from_secs(5) {
+                        v.append(&mut format!("        {}", message).as_bytes().to_vec());
+                    }
+                }
             }
         }
+
+        v.append(&mut vec![b' '; self.term_cols - v.len()]);
 
         v.append(&mut CtrlSeq::NormalColors.into());
 
@@ -392,18 +419,10 @@ impl Editor {
 }
 
 fn cx_to_rx(line: &str, cx: usize) -> usize {
-    let relevent_slice = &line[0..cx];
-    let mut rx = 0;
-
-    for c in relevent_slice.chars() {
-        if c == '\t' {
-            rx += 4;
-        } else {
-            rx += 1;
-        }
-    }
-
-    rx
+    line[0..cx].chars().fold(0, |acc, c| match c.cmp(&'\t') {
+        Ordering::Equal => acc + 4,
+        _ => acc + 1,
+    })
 }
 
 fn main() -> io::Result<()> {
@@ -460,9 +479,9 @@ fn handle_key(c: u8) -> KeyPress {
 }
 
 fn handle_escape_seq() -> io::Result<ArrowKey> {
-    let mut buffer = [0; 3];
+    let mut buffer = [0; 2];
 
-    io::stdin().lock().read(&mut buffer).unwrap();
+    io::stdin().lock().read_exact(&mut buffer)?;
     if buffer[0] == b'[' {
         let movement = match buffer[1] {
             b'A' => ArrowKey::Up,
