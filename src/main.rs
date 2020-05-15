@@ -54,6 +54,8 @@ enum CtrlSeq {
     ShowCursor,
     /// Moves the cursor to a position in the terminal
     MoveCursor(CursorPosition),
+    InvertedColors,
+    NormalColors,
 }
 
 impl From<CtrlSeq> for Vec<u8> {
@@ -67,6 +69,8 @@ impl From<CtrlSeq> for Vec<u8> {
             CtrlSeq::MoveCursor(cp) => format!("\x1b[{};{}H", cp.y + 1, cp.x + 1)
                 .as_bytes()
                 .to_vec(),
+            CtrlSeq::InvertedColors => b"\x1b[7m".to_vec(),
+            CtrlSeq::NormalColors => b"\x1b[m".to_vec(),
         }
     }
 }
@@ -162,7 +166,7 @@ impl Editor {
 
         Editor {
             _mode: mode,
-            term_rows: (rows - 1) as usize,
+            term_rows: (rows - 2) as usize,
             term_cols: (cols - 1) as usize,
             cur_pos: CursorPosition::default(),
             rx: 0,
@@ -205,7 +209,9 @@ impl Editor {
             }
             ArrowKey::Right => {
                 if let Some(current_line) = self.current_line() {
-                    if self.cur_pos.x == current_line.len() || self.cur_pos.x + self.col_offset == current_line.len() {
+                    if self.cur_pos.x == current_line.len()
+                        || self.cur_pos.x + self.col_offset == current_line.len()
+                    {
                         self.cur_pos.x = 0;
                         self.col_offset = 0;
 
@@ -292,7 +298,6 @@ impl Editor {
             self.rx = 0;
         }
 
-
         send_esc_seq(CtrlSeq::MoveCursor(CursorPosition {
             x: self.rx,
             y: self.cur_pos.y,
@@ -338,19 +343,19 @@ impl Editor {
                 append_buffer.push(b'~');
             }
 
-            if idx < self.term_rows + self.row_offset {
-                append_buffer.push(b'\r');
-                append_buffer.push(b'\n');
-                append_buffer.append(&mut CtrlSeq::ClearLine.into());
-            }
+            append_buffer.push(b'\r');
+            append_buffer.push(b'\n');
+            append_buffer.append(&mut CtrlSeq::ClearLine.into());
         }
+
+        append_buffer.append(&mut self.render_status_bar());
 
         send_esc_seq(CtrlSeq::HideCursor);
         send_esc_seq(CtrlSeq::GotoStart);
         stdout_write(append_buffer);
         send_esc_seq(CtrlSeq::MoveCursor(CursorPosition {
             x: self.rx,
-            y: self.cur_pos.y
+            y: self.cur_pos.y,
         }));
         send_esc_seq(CtrlSeq::ShowCursor);
     }
@@ -358,6 +363,29 @@ impl Editor {
     fn current_line(&self) -> Option<&Row> {
         let current_line_idx = self.row_offset + self.cur_pos.y;
         self.rows.get(current_line_idx)
+    }
+
+    fn render_status_bar(&self) -> Vec<u8> {
+        //TODO: Make the status bar nicer
+        let mut v = Vec::new();
+        v.append(&mut CtrlSeq::InvertedColors.into());
+
+        match self.file {
+            None => v.append(&mut b"[No open file]".to_vec()),
+            Some(_) => {
+                v.append(&mut b"[Open File!]    ".to_vec());
+                let current_line_idx = self.cur_pos.y + self.row_offset;
+                let precenteges = current_line_idx * 100 / self.rows.len();
+                let lines = format!("{}/{}", current_line_idx + 1, self.rows.len());
+                v.append(&mut lines.as_bytes().to_vec());
+                let foramated = format!("    {}%", precenteges);
+                v.append(&mut foramated.as_bytes().to_vec());
+            }
+        }
+
+        v.append(&mut CtrlSeq::NormalColors.into());
+
+        v
     }
 }
 
