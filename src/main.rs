@@ -159,6 +159,15 @@ impl Default for SystemMessage {
     }
 }
 
+impl SystemMessage {
+    fn new(message: impl AsRef<String>) -> Self {
+        SystemMessage {
+            message: Some(message.as_ref().to_string()),
+            time: Instant::now(),
+        }
+    }
+}
+
 type Row = String;
 
 struct Editor {
@@ -213,7 +222,7 @@ impl Editor {
 
                     if !(self.row_offset == 0 && self.cur_pos.y == 0) {
                         if let Some(current_line) = self.current_line() {
-                            let line_length = current_line.len();
+                            let line_length = current_line.len().saturating_sub(1);
                             if line_length > self.term_cols {
                                 self.col_offset = line_length - self.term_cols;
                                 self.cur_pos.x = self.term_cols;
@@ -227,8 +236,9 @@ impl Editor {
             }
             ArrowKey::Right => {
                 if let Some(current_line) = self.current_line() {
-                    if self.cur_pos.x == current_line.len()
-                        || self.cur_pos.x + self.col_offset == current_line.len()
+                    let line_length = current_line.len().saturating_sub(1);
+                    if self.cur_pos.x == line_length
+                        || self.cur_pos.x + self.col_offset == line_length
                     {
                         if self.cur_pos.y + self.row_offset != self.rows.len() - 1 {
                             self.cur_pos.x = 0;
@@ -283,7 +293,7 @@ impl Editor {
                 self.col_offset = 0;
             }
             ArrowKey::End => {
-                let current_line_len = self.current_line().unwrap().len();
+                let current_line_len = self.current_line().unwrap().len().saturating_sub(1);
                 self.cur_pos.x = match self.term_cols.cmp(&current_line_len) {
                     Ordering::Greater | Ordering::Equal => current_line_len,
                     Ordering::Less => {
