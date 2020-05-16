@@ -77,31 +77,6 @@ impl From<CtrlSeq> for Vec<u8> {
     }
 }
 
-/// Send an escape sequence to the actual terminal
-fn send_esc_seq(ctrl: CtrlSeq) {
-    stdout_write(Vec::from(ctrl));
-}
-
-fn ctrl_key(c: char) -> u8 {
-    c as u8 & 0x1f
-}
-
-/// Gets terminal size as (X, Y) tuple. **Note:** libc returns a value in the  [1..N] range,
-fn get_window_size() -> io::Result<(i16, i16)> {
-    let fd = io::stdin().as_raw_fd();
-    let mut winsize = WindowSize::default();
-
-    let return_code = unsafe { ioctl(fd, TIOCGWINSZ, &mut winsize as *mut _) };
-    if (return_code == -1) || (winsize.ws_col == 0) {
-        Err(Error::new(
-            ErrorKind::Other,
-            "get_window_size: ioctl failed or returned invalid value",
-        ))
-    } else {
-        Ok((winsize.ws_row, winsize.ws_col))
-    }
-}
-
 /// A helper function to write data into stdout
 fn stdout_write(buff: impl AsRef<[u8]>) {
     io::stdout().lock().write_all(buff.as_ref()).unwrap();
@@ -236,7 +211,7 @@ impl Editor {
             }
             ArrowKey::Right => {
                 if let Some(current_line) = self.current_line() {
-                    let line_length = current_line.len().saturating_sub(1);
+                    let line_length = current_line.len();
                     if self.cur_pos.x == line_length
                         || self.cur_pos.x + self.col_offset == line_length
                     {
@@ -283,7 +258,7 @@ impl Editor {
 
                     if let Some(next_line) = self.current_line() {
                         if self.cur_pos.x > next_line.len() {
-                            self.cur_pos.x = next_line.len();
+                            self.cur_pos.x = next_line.len().saturating_sub(1);
                         }
                     }
                 }
@@ -293,7 +268,7 @@ impl Editor {
                 self.col_offset = 0;
             }
             ArrowKey::End => {
-                let current_line_len = self.current_line().unwrap().len().saturating_sub(1);
+                let current_line_len = self.current_line().unwrap().len();
                 self.cur_pos.x = match self.term_cols.cmp(&current_line_len) {
                     Ordering::Greater | Ordering::Equal => current_line_len,
                     Ordering::Less => {
@@ -426,6 +401,17 @@ impl Editor {
 
         v
     }
+
+    fn insert_char(&mut self, c: char) {
+        let x = self.cur_pos.x + self.col_offset;
+        let y = self.cur_pos.y + self.row_offset;
+
+        let row = self.rows[y].clone();
+        //row.replace_range(x..x+1, &c.to_string())
+        let new = [&row[0..x], c.to_string().as_str(), &row[x..]].concat();
+        self.rows[y] = new;
+        self.move_cursor(&ArrowKey::Right);
+    }
 }
 
 fn cx_to_rx(line: &str, cx: usize) -> usize {
@@ -459,14 +445,17 @@ fn main() -> io::Result<()> {
                 }
                 KeyPress::Refresh => {
                     refresh_screen();
-                    e.draw();
                 }
                 KeyPress::Escape => {
                     if let Ok(ak) = handle_escape_seq() {
                         e.move_cursor(&ak);
                     }
                 }
-                KeyPress::Key(_) => {}
+                KeyPress::Key(c) => {
+                    if !(c as char).is_ascii_control() {
+                        e.insert_char(c as char)
+                    }
+                }
             }
 
             e.draw();
@@ -524,5 +513,30 @@ fn render_row(row: &str, tab_size: u8) -> Vec<u8> {
             Ordering::Equal => vec![b' '; tab_size.into()],
             _ => vec![c as u8],
         })
-        .collect::<Vec<_>>()
+        .collect()
+}
+
+/// Send an escape sequence to the actual terminal
+fn send_esc_seq(ctrl: CtrlSeq) {
+    stdout_write(Vec::from(ctrl));
+}
+
+fn ctrl_key(c: char) -> u8 {
+    c as u8 & 0x1f
+}
+
+/// Gets terminal size as (X, Y) tuple. **Note:** libc returns a value in the  [1..N] range,
+fn get_window_size() -> io::Result<(i16, i16)> {
+    let fd = io::stdin().as_raw_fd();
+    let mut winsize = WindowSize::default();
+
+    let return_code = unsafe { ioctl(fd, TIOCGWINSZ, &mut winsize as *mut _) };
+    if (return_code == -1) || (winsize.ws_col == 0) {
+        Err(Error::new(
+            ErrorKind::Other,
+            "get_window_size: ioctl failed or returned invalid value",
+        ))
+    } else {
+        Ok((winsize.ws_row, winsize.ws_col))
+    }
 }
