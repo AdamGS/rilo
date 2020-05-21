@@ -3,19 +3,19 @@
 
 use nix::libc::{ioctl, TIOCGWINSZ};
 use std::cmp::Ordering;
-use std::fs::File;
-use std::io::{self, Error, ErrorKind, Read, Write};
+use std::fs::{File, OpenOptions};
+use std::io::prelude::*;
+use std::io::{self, Error, ErrorKind, LineWriter, Read, SeekFrom, Write};
 use std::os::raw::c_short;
 use std::os::unix::prelude::*;
 use std::path::Path;
+use std::time::{Duration, Instant};
 use termios::{
     Termios, BRKINT, CS8, ECHO, ICANON, ICRNL, IEXTEN, INPCK, ISIG, ISTRIP, IXON, OPOST, TCSAFLUSH,
     VMIN, VTIME,
 };
 
-use std::time::Instant;
-
-/// The cursor's position, **inside** the terminal.
+/// The cursor's position relative to the terminal
 #[derive(Copy, Clone, Default)]
 struct CursorPosition {
     x: usize,
@@ -23,7 +23,7 @@ struct CursorPosition {
 }
 
 /// An enum representing a navigation key press
-enum ArrowKey {
+enum NavigationKey {
     Left,
     Right,
     Up,
@@ -32,14 +32,15 @@ enum ArrowKey {
     End,
     PageUp,
     PageDown,
-    Delete,
 }
 
-enum KeyPress {
+enum Action {
     Quit,
     Refresh,
     Escape,
-    Key(u8),
+    Save,
+    Delete,
+    Input(char),
 }
 
 /// Various commands we might issue to the terminal
@@ -56,8 +57,8 @@ enum CtrlSeq {
     ShowCursor,
     /// Moves the cursor to a position in the terminal
     MoveCursor(CursorPosition),
-    InvertedColors,
-    NormalColors,
+    InverteColor,
+    NormalColor,
 }
 
 impl From<CtrlSeq> for Vec<u8> {
@@ -71,8 +72,8 @@ impl From<CtrlSeq> for Vec<u8> {
             CtrlSeq::MoveCursor(cp) => format!("\x1b[{};{}H", cp.y + 1, cp.x + 1)
                 .as_bytes()
                 .to_vec(),
-            CtrlSeq::InvertedColors => b"\x1b[7m".to_vec(),
-            CtrlSeq::NormalColors => b"\x1b[m".to_vec(),
+            CtrlSeq::InverteColor => b"\x1b[7m".to_vec(),
+            CtrlSeq::NormalColor => b"\x1b[m".to_vec(),
         }
     }
 }
@@ -135,9 +136,9 @@ impl Default for SystemMessage {
 }
 
 impl SystemMessage {
-    fn new(message: impl AsRef<String>) -> Self {
+    fn new(message: &str) -> Self {
         SystemMessage {
-            message: Some(message.as_ref().to_string()),
+            message: Some(message.to_string()),
             time: Instant::now(),
         }
     }
@@ -157,6 +158,8 @@ struct Editor {
     file: Option<File>,
     rows: Vec<Row>,
     message: SystemMessage,
+    dirty_flag: bool,
+    path: Option<String>,
 }
 
 impl Editor {
@@ -167,7 +170,7 @@ impl Editor {
 
         Editor {
             _mode: mode,
-            term_rows: (rows - 2) as usize,
+            term_rows: (rows - 2) as usize, // -2 to leave a row for the status bar
             term_cols: (cols - 1) as usize,
             cur_pos: CursorPosition::default(),
             rx: 0,
@@ -176,14 +179,16 @@ impl Editor {
             tab_size: 4,
             file: Default::default(),
             rows: Default::default(),
-            message: SystemMessage::default(),
+            message: SystemMessage::new("HELP: Ctrl-S = save | Ctrl-Q = quit"),
+            dirty_flag: false,
+            path: None,
         }
     }
 
     /// Handles both the internal state held in the Editor, and moves the cursor on the terminal
-    fn move_cursor(&mut self, ak: &ArrowKey) {
+    fn move_cursor(&mut self, ak: &NavigationKey) {
         match ak {
-            ArrowKey::Left => {
+            NavigationKey::Left => {
                 if self.cur_pos.x != 0 {
                     self.cur_pos.x -= 1;
                 } else if self.cur_pos.x == 0 && self.col_offset != 0 {
@@ -209,13 +214,13 @@ impl Editor {
                     }
                 }
             }
-            ArrowKey::Right => {
+            NavigationKey::Right => {
                 if let Some(current_line) = self.current_line() {
                     let line_length = current_line.len();
                     if self.cur_pos.x == line_length
                         || self.cur_pos.x + self.col_offset == line_length
                     {
-                        if self.cur_pos.y + self.row_offset != self.rows.len() - 1 {
+                        if self.cur_pos.y + self.row_offset != self.rows.len() {
                             self.cur_pos.x = 0;
                             self.col_offset = 0;
 
@@ -232,7 +237,7 @@ impl Editor {
                     }
                 }
             }
-            ArrowKey::Up => {
+            NavigationKey::Up => {
                 if self.cur_pos.y != 0 {
                     self.cur_pos.y -= 1;
                 } else if self.cur_pos.y == 0 && self.row_offset != 0 {
@@ -245,7 +250,7 @@ impl Editor {
                     }
                 }
             }
-            ArrowKey::Down => {
+            NavigationKey::Down => {
                 let file_length = self.rows.len() - 1;
                 if self.row_offset + self.cur_pos.y != file_length {
                     if self.cur_pos.y != self.term_rows {
@@ -263,11 +268,11 @@ impl Editor {
                     }
                 }
             }
-            ArrowKey::Home => {
+            NavigationKey::Home => {
                 self.cur_pos.x = 0;
                 self.col_offset = 0;
             }
-            ArrowKey::End => {
+            NavigationKey::End => {
                 let current_line_len = self.current_line().unwrap().len();
                 self.cur_pos.x = match self.term_cols.cmp(&current_line_len) {
                     Ordering::Greater | Ordering::Equal => current_line_len,
@@ -277,7 +282,7 @@ impl Editor {
                     }
                 };
             }
-            ArrowKey::PageUp => {
+            NavigationKey::PageUp => {
                 self.cur_pos.y = 0;
                 if let Some(next_line) = self.current_line() {
                     if self.cur_pos.x > next_line.len() {
@@ -285,7 +290,7 @@ impl Editor {
                     }
                 }
             }
-            ArrowKey::PageDown => {
+            NavigationKey::PageDown => {
                 self.cur_pos.y = self.term_rows;
                 if let Some(next_line) = self.current_line() {
                     if self.cur_pos.x > next_line.len() {
@@ -293,15 +298,14 @@ impl Editor {
                     }
                 }
             }
-            ArrowKey::Delete => {}
         };
 
         // Render correct rx
-        if let Some(curr_line) = self.current_line() {
-            self.rx = cx_to_rx(curr_line, self.cur_pos.x);
+        self.rx = if let Some(curr_line) = self.current_line() {
+            cx_to_rx(curr_line, self.cur_pos.x)
         } else {
-            self.rx = 0;
-        }
+            0
+        };
 
         send_esc_seq(CtrlSeq::MoveCursor(CursorPosition {
             x: self.rx,
@@ -310,15 +314,38 @@ impl Editor {
     }
 
     /// Open a file to edit/read
-    fn open(&mut self, filename: impl AsRef<Path>) -> io::Result<()> {
-        use std::io::BufRead;
-
+    fn open(&mut self, filename: impl AsRef<Path> + Clone) -> io::Result<()> {
         if filename.as_ref().is_file() {
-            self.file = Some(File::open(filename)?);
+            self.file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&filename)
+                .ok();
+
+            self.path = Some(String::from(filename.as_ref().to_str().unwrap()));
+
             self.rows = io::BufReader::new(self.file.as_ref().unwrap())
                 .lines()
                 .map(std::result::Result::unwrap)
                 .collect();
+        }
+
+        Ok(())
+    }
+
+    fn save(&mut self) -> io::Result<()> {
+        // TODO: Move all system message handeling from main loop to this function
+        if let Some(f) = &mut self.file {
+            f.seek(SeekFrom::Start(0))?;
+            let mut writer = LineWriter::new(f);
+            self.rows.iter().for_each(|row| {
+                writer.write_all(format!("{}\n", row).as_bytes()).unwrap();
+            });
+
+            writer.flush()?;
+            self.dirty_flag = false;
+        } else {
+            // TODO: prompt some "save as" stuff
         }
 
         Ok(())
@@ -332,17 +359,15 @@ impl Editor {
         for idx in self.row_offset..=self.term_rows + self.row_offset {
             if idx < self.rows.len() {
                 let line = &self.rows[idx];
+                // If the line is long enough to see anything because of horizontal scrolling
                 if line.len() > self.col_offset {
-                    let range = if line.len() < self.term_cols {
-                        self.col_offset..line.len()
-                    } else if line.len() > self.col_offset + self.term_cols {
+                    let range = if line.len() > self.col_offset + self.term_cols {
                         self.col_offset..self.col_offset + self.term_cols
                     } else {
                         self.col_offset..line.len()
                     };
                     let ranged_line = line[range].to_string();
-                    let mut rendered_line = render_row(&ranged_line, self.tab_size);
-                    append_buffer.append(&mut rendered_line)
+                    append_buffer.extend(render_row(&ranged_line, self.tab_size));
                 }
             } else {
                 append_buffer.push(b'~');
@@ -353,7 +378,7 @@ impl Editor {
             append_buffer.append(&mut CtrlSeq::ClearLine.into());
         }
 
-        append_buffer.append(&mut self.render_status_bar());
+        append_buffer.extend(self.render_status_bar());
 
         send_esc_seq(CtrlSeq::HideCursor);
         send_esc_seq(CtrlSeq::GotoStart);
@@ -373,52 +398,70 @@ impl Editor {
     fn render_status_bar(&self) -> Vec<u8> {
         //TODO: Make the status bar nicer
         let mut v = Vec::new();
-        v.append(&mut CtrlSeq::InvertedColors.into());
+        v.append(&mut CtrlSeq::InverteColor.into());
 
         match self.file {
-            None => v.append(&mut b"[No open file]".to_vec()),
+            None => v.extend(b"[No open file]"),
             Some(_) => {
-                v.append(&mut b"[Open File!]        ".to_vec());
+                let open_file = format!("[Open: {}]        ", self.path.as_ref().unwrap());
+                v.extend(open_file.as_bytes());
                 let current_line_idx = self.cur_pos.y + self.row_offset;
-                let precenteges = (current_line_idx + 1) * 100 / self.rows.len();
+                let precenteges = ((current_line_idx + 1) * 100)
+                    .checked_div(self.rows.len())
+                    .unwrap_or(0);
                 let lines = format!("{}/{}", current_line_idx + 1, self.rows.len());
-                v.append(&mut lines.as_bytes().to_vec());
-                let foramated = format!("        {}%", precenteges);
-                v.append(&mut foramated.as_bytes().to_vec());
+                v.extend(lines.as_bytes());
+                let formated = format!("        {}%", precenteges);
+                v.extend(formated.as_bytes());
 
-                use std::time::Duration;
                 if let Some(message) = &self.message.message {
                     if self.message.time.elapsed() < Duration::from_secs(5) {
-                        v.append(&mut format!("        {}", message).as_bytes().to_vec());
+                        let display_message = format!("        {}", message);
+                        v.extend(display_message.as_bytes());
                     }
                 }
             }
         }
 
-        v.append(&mut vec![b' '; self.term_cols - v.len()]);
+        v.extend(vec![b' '; self.term_cols.saturating_sub(v.len())]);
 
-        v.append(&mut CtrlSeq::NormalColors.into());
-
+        // TODO: This is not good :(
+        let mut v = v[0..self.term_cols].to_vec();
+        v.append(&mut CtrlSeq::NormalColor.into());
         v
     }
 
     fn insert_char(&mut self, c: char) {
+        self.dirty_flag = true;
+        let x = self.cur_pos.x + self.col_offset;
+        let y = self.cur_pos.y + self.row_offset;
+
+        // If we are on the last row in the file
+        if y == self.rows.len() {
+            let mut row = String::new();
+            row.push(c);
+            self.rows.push(row);
+        } else {
+            let row = self.rows[y].clone();
+            let new_row = [&row[0..x], c.to_string().as_str(), &row[x..]].concat();
+            self.rows[y] = new_row;
+        }
+
+        self.move_cursor(&NavigationKey::Right);
+    }
+
+    fn remove_char(&mut self) {
+        self.dirty_flag = true;
         let x = self.cur_pos.x + self.col_offset;
         let y = self.cur_pos.y + self.row_offset;
 
         let row = self.rows[y].clone();
-        //row.replace_range(x..x+1, &c.to_string())
-        let new = [&row[0..x], c.to_string().as_str(), &row[x..]].concat();
-        self.rows[y] = new;
-        self.move_cursor(&ArrowKey::Right);
-    }
-}
+        if x != 0 {
+            self.rows[y] = [&row[0..x - 1], &row[x..]].concat();
+        };
 
-fn cx_to_rx(line: &str, cx: usize) -> usize {
-    line[0..cx].chars().fold(0, |acc, c| match c.cmp(&'\t') {
-        Ordering::Equal => acc + 4,
-        _ => acc + 1,
-    })
+        self.move_cursor(&NavigationKey::Left);
+    }
 }
 
 fn main() -> io::Result<()> {
@@ -438,22 +481,36 @@ fn main() -> io::Result<()> {
     loop {
         if io::stdin().read(&mut buff)? != 0 {
             match handle_key(buff[0]) {
-                KeyPress::Quit => {
+                Action::Quit => {
                     send_esc_seq(CtrlSeq::ClearScreen);
                     send_esc_seq(CtrlSeq::GotoStart);
                     break;
                 }
-                KeyPress::Refresh => {
+                Action::Refresh => {
                     refresh_screen();
                 }
-                KeyPress::Escape => {
+                Action::Escape => {
                     if let Ok(ak) = handle_escape_seq() {
                         e.move_cursor(&ak);
                     }
                 }
-                KeyPress::Key(c) => {
-                    if !(c as char).is_ascii_control() {
-                        e.insert_char(c as char)
+                Action::Save => {
+                    if e.dirty_flag {
+                        e.message = SystemMessage::new(match e.save() {
+                            Ok(_) => "File saved successfully!",
+                            Err(_) => "Error saving file!",
+                        })
+                    } else {
+                        e.message = SystemMessage::new("No Changes Made!");
+                        e.dirty_flag = false;
+                    }
+                }
+                Action::Delete => {
+                    e.remove_char();
+                }
+                Action::Input(c) => {
+                    if !c.is_ascii_control() {
+                        e.insert_char(c)
                     }
                 }
             }
@@ -465,33 +522,36 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-fn handle_key(c: u8) -> KeyPress {
+fn handle_key(c: u8) -> Action {
     if c == ctrl_key('q') {
-        KeyPress::Quit
+        Action::Quit
     } else if c == ctrl_key('x') {
-        KeyPress::Refresh
+        Action::Refresh
+    } else if c == ctrl_key('s') {
+        Action::Save
     } else if c == b'\x1b' {
-        KeyPress::Escape
+        Action::Escape
+    } else if c == 27 || c == 127 {
+        Action::Delete
     } else {
-        KeyPress::Key(c)
+        Action::Input(c as char)
     }
 }
 
-fn handle_escape_seq() -> io::Result<ArrowKey> {
-    let mut buffer = [0; 2];
-
-    io::stdin().lock().read_exact(&mut buffer)?;
+fn handle_escape_seq() -> io::Result<NavigationKey> {
+    let mut buffer = [0; 3];
+    // We need to use read() because some esc sequences are 3 bytes and some are 2
+    io::stdin().lock().read(&mut buffer)?;
     if buffer[0] == b'[' {
         let movement = match buffer[1] {
-            b'A' => ArrowKey::Up,
-            b'B' => ArrowKey::Down,
-            b'C' => ArrowKey::Right,
-            b'D' => ArrowKey::Left,
-            b'H' => ArrowKey::Home,
-            b'F' => ArrowKey::End,
-            b'3' => ArrowKey::Delete,
-            b'5' => ArrowKey::PageUp,
-            b'6' => ArrowKey::PageDown,
+            b'A' => NavigationKey::Up,
+            b'B' => NavigationKey::Down,
+            b'C' => NavigationKey::Right,
+            b'D' => NavigationKey::Left,
+            b'H' => NavigationKey::Home,
+            b'F' => NavigationKey::End,
+            b'5' => NavigationKey::PageUp,
+            b'6' => NavigationKey::PageDown,
             _ => return Err(Error::from(ErrorKind::InvalidData)),
         };
 
@@ -525,7 +585,7 @@ fn ctrl_key(c: char) -> u8 {
     c as u8 & 0x1f
 }
 
-/// Gets terminal size as (X, Y) tuple. **Note:** libc returns a value in the  [1..N] range,
+/// Gets terminal size as (X, Y) tuple. **Note:** libc returns a value in the  [1..N] range, so we do the same
 fn get_window_size() -> io::Result<(i16, i16)> {
     let fd = io::stdin().as_raw_fd();
     let mut winsize = WindowSize::default();
@@ -539,4 +599,11 @@ fn get_window_size() -> io::Result<(i16, i16)> {
     } else {
         Ok((winsize.ws_row, winsize.ws_col))
     }
+}
+
+fn cx_to_rx(line: &str, cx: usize) -> usize {
+    line[0..cx].chars().fold(0, |acc, c| match c.cmp(&'\t') {
+        Ordering::Equal => acc + 4,
+        _ => acc + 1,
+    })
 }
