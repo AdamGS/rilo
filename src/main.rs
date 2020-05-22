@@ -358,12 +358,14 @@ impl Editor {
         // TODO: Move all system message handeling from main loop to this function
         if let Some(f) = &mut self.file {
             f.seek(SeekFrom::Start(0))?;
+            f.set_len(0)?;
             let mut writer = LineWriter::new(f);
             self.rows.iter().for_each(|row| {
                 writer.write_all(format!("{}\n", row).as_bytes()).unwrap();
             });
 
             writer.flush()?;
+
             self.dirty_flag = false;
         } else {
             // TODO: prompt some "save as" stuff
@@ -423,10 +425,13 @@ impl Editor {
 
     fn rx(&self) -> usize {
         if let Some(line) = self.current_line() {
-        line[0..self.cur_pos.x].chars().fold(0, |acc, c| match c.cmp(&'\t') {
-            Ordering::Equal => acc + 4,
-            _ => acc + 1,
-        }) } else {
+            line[0..self.cur_pos.x]
+                .chars()
+                .fold(0, |acc, c| match c.cmp(&'\t') {
+                    Ordering::Equal => acc + 4,
+                    _ => acc + 1,
+                })
+        } else {
             0
         }
     }
@@ -505,10 +510,18 @@ impl Editor {
         let x = self.cur_pos.x + self.col_offset;
         let y = self.cur_pos.y + self.row_offset;
 
-        let row = self.rows[y].clone();
-        if x != 0 {
-            self.rows[y] = [&row[0..x - 1], &row[x..]].concat();
-        };
+        // Remove row and move one up
+        if x == 0 {
+            if let Some(line) = &mut self.current_line() {
+                self.rows[y - 1] = [self.rows[y - 1].clone(), line.to_string()].concat();
+                self.rows.remove(y);
+            }
+        } else {
+            let row = self.rows[y].clone();
+            if x != 0 {
+                self.rows[y] = [&row[0..x - 1], &row[x..]].concat();
+            };
+        }
 
         self.move_cursor(&NavigationKey::Left);
     }
