@@ -15,6 +15,8 @@ use termios::{
     VMIN, VTIME,
 };
 
+const TAB_SIZE: u8 = 4;
+
 /// The cursor's position relative to the terminal
 #[derive(Copy, Clone, Default)]
 struct CursorPosition {
@@ -40,7 +42,28 @@ enum Action {
     Escape,
     Save,
     Delete,
+    Enter,
     Input(char),
+}
+
+impl From<u8> for Action {
+    fn from(c: u8) -> Self {
+        if c == ctrl_key('q') {
+            Action::Quit
+        } else if c == ctrl_key('x') {
+            Action::Refresh
+        } else if c == ctrl_key('s') {
+            Action::Save
+        } else if c == b'\x1b' {
+            Action::Escape
+        } else if c == 27 || c == 127 {
+            Action::Delete
+        } else if c == b'\r' {
+            Action::Enter
+        } else {
+            Action::Input(c as char)
+        }
+    }
 }
 
 /// Various commands we might issue to the terminal
@@ -151,7 +174,6 @@ struct Editor {
     term_rows: usize,
     term_cols: usize,
     cur_pos: CursorPosition,
-    rx: usize,
     row_offset: usize,
     col_offset: usize,
     tab_size: u8,
@@ -173,10 +195,9 @@ impl Editor {
             term_rows: (rows - 2) as usize, // -2 to leave a row for the status bar
             term_cols: (cols - 1) as usize,
             cur_pos: CursorPosition::default(),
-            rx: 0,
             row_offset: 0,
             col_offset: 0,
-            tab_size: 4,
+            tab_size: TAB_SIZE,
             file: Default::default(),
             rows: Default::default(),
             message: SystemMessage::new("HELP: Ctrl-S = save | Ctrl-Q = quit"),
@@ -301,14 +322,14 @@ impl Editor {
         };
 
         // Render correct rx
-        self.rx = if let Some(curr_line) = self.current_line() {
-            cx_to_rx(curr_line, self.cur_pos.x)
-        } else {
-            0
-        };
+        // self.rx = if let Some(curr_line) = self.current_line() {
+        //     cx_to_rx(curr_line, self.cur_pos.x)
+        // } else {
+        //     0
+        // };
 
         send_esc_seq(CtrlSeq::MoveCursor(CursorPosition {
-            x: self.rx,
+            x: self.rx(),
             y: self.cur_pos.y,
         }));
     }
@@ -352,7 +373,7 @@ impl Editor {
     }
 
     /// Draws out the current state held in the editor to the terminal
-    fn draw(&self) {
+    fn draw(&mut self) {
         // We use a Vec we can push all the data on screen into, and then write it in one go into stdout
         let mut append_buffer: Vec<u8> = Vec::new();
         append_buffer.append(&mut CtrlSeq::ClearLine.into());
@@ -383,8 +404,13 @@ impl Editor {
         send_esc_seq(CtrlSeq::HideCursor);
         send_esc_seq(CtrlSeq::GotoStart);
         stdout_write(append_buffer);
+        // self.rx = if let Some(curr_line) = self.current_line() {
+        //     cx_to_rx(curr_line, self.cur_pos.x)
+        // } else {
+        //     0
+        // };
         send_esc_seq(CtrlSeq::MoveCursor(CursorPosition {
-            x: self.rx,
+            x: self.rx(),
             y: self.cur_pos.y,
         }));
         send_esc_seq(CtrlSeq::ShowCursor);
@@ -393,6 +419,16 @@ impl Editor {
     fn current_line(&self) -> Option<&Row> {
         let current_line_idx = self.row_offset + self.cur_pos.y;
         self.rows.get(current_line_idx)
+    }
+
+    fn rx(&self) -> usize {
+        if let Some(line) = self.current_line() {
+        line[0..self.cur_pos.x].chars().fold(0, |acc, c| match c.cmp(&'\t') {
+            Ordering::Equal => acc + 4,
+            _ => acc + 1,
+        }) } else {
+            0
+        }
     }
 
     fn render_status_bar(&self) -> Vec<u8> {
@@ -429,6 +465,20 @@ impl Editor {
         let mut v = v[0..self.term_cols].to_vec();
         v.append(&mut CtrlSeq::NormalColor.into());
         v
+    }
+
+    fn insert_newline(&mut self) {
+        self.dirty_flag = true;
+        let x = self.cur_pos.x + self.col_offset;
+        let y = self.cur_pos.y + self.row_offset;
+        let curr_line = self.rows[y].clone();
+        self.rows.insert(y, String::new());
+        self.rows[y] = curr_line[0..x].to_string();
+        self.rows[y + 1] = curr_line[x..].to_string();
+        self.cur_pos.x = 0;
+        self.col_offset = 0;
+        self.cur_pos.y += 1;
+        self.col_offset = 0;
     }
 
     fn insert_char(&mut self, c: char) {
@@ -480,7 +530,7 @@ fn main() -> io::Result<()> {
     let mut buff = [0; 1];
     loop {
         if io::stdin().read(&mut buff)? != 0 {
-            match handle_key(buff[0]) {
+            match buff[0].into() {
                 Action::Quit => {
                     send_esc_seq(CtrlSeq::ClearScreen);
                     send_esc_seq(CtrlSeq::GotoStart);
@@ -508,6 +558,7 @@ fn main() -> io::Result<()> {
                 Action::Delete => {
                     e.remove_char();
                 }
+                Action::Enter => e.insert_newline(),
                 Action::Input(c) => {
                     if !c.is_ascii_control() {
                         e.insert_char(c)
@@ -520,22 +571,6 @@ fn main() -> io::Result<()> {
     }
 
     Ok(())
-}
-
-fn handle_key(c: u8) -> Action {
-    if c == ctrl_key('q') {
-        Action::Quit
-    } else if c == ctrl_key('x') {
-        Action::Refresh
-    } else if c == ctrl_key('s') {
-        Action::Save
-    } else if c == b'\x1b' {
-        Action::Escape
-    } else if c == 27 || c == 127 {
-        Action::Delete
-    } else {
-        Action::Input(c as char)
-    }
 }
 
 fn handle_escape_seq() -> io::Result<NavigationKey> {
@@ -599,11 +634,4 @@ fn get_window_size() -> io::Result<(i16, i16)> {
     } else {
         Ok((winsize.ws_row, winsize.ws_col))
     }
-}
-
-fn cx_to_rx(line: &str, cx: usize) -> usize {
-    line[0..cx].chars().fold(0, |acc, c| match c.cmp(&'\t') {
-        Ordering::Equal => acc + 4,
-        _ => acc + 1,
-    })
 }
