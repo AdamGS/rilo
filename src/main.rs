@@ -43,6 +43,7 @@ enum Action {
     Save,
     Delete,
     Enter,
+    Cancel,
     Input(char),
 }
 
@@ -54,6 +55,8 @@ impl From<u8> for Action {
             Action::Refresh
         } else if c == ctrl_key('s') {
             Action::Save
+        } else if c == ctrl_key('c') {
+            Action::Cancel
         } else if c == b'\x1b' {
             Action::Escape
         } else if c == 27 || c == 127 {
@@ -344,7 +347,6 @@ impl Editor {
                 .ok();
 
             self.path = Some(String::from(filename.as_ref().to_str().unwrap()));
-
             self.rows = io::BufReader::new(self.file.as_ref().unwrap())
                 .lines()
                 .map(std::result::Result::unwrap)
@@ -367,8 +369,17 @@ impl Editor {
             writer.flush()?;
 
             self.dirty_flag = false;
+        } else if let Ok(new_file) = self.prompt("Save to: ") {
+            let new = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(&new_file)
+                .ok();
+            self.file = new;
+            self.save()?;
         } else {
-            // TODO: prompt some "save as" stuff
+            // Return error on display it
         }
 
         Ok(())
@@ -442,9 +453,18 @@ impl Editor {
         v.append(&mut CtrlSeq::InverteColor.into());
 
         match self.file {
-            None => v.extend(b"[No open file]"),
+            None => v.extend(
+                format!(
+                    "[No open file]   {}",
+                    self.message.message.as_ref().unwrap_or(&String::from(""))
+                )
+                .into_bytes(),
+            ),
             Some(_) => {
-                let open_file = format!("[Open: {}]        ", self.path.as_ref().unwrap());
+                let open_file = format!(
+                    "[Open: {}]        ",
+                    self.path.as_ref().unwrap_or(&String::from(""))
+                );
                 v.extend(open_file.as_bytes());
                 let current_line_idx = self.cur_pos.y + self.row_offset;
                 let precenteges = ((current_line_idx + 1) * 100)
@@ -470,6 +490,29 @@ impl Editor {
         let mut v = v[0..self.term_cols].to_vec();
         v.append(&mut CtrlSeq::NormalColor.into());
         v
+    }
+
+    fn prompt(&mut self, prompt_prefix: &str) -> io::Result<String> {
+        let mut prompt = String::from(prompt_prefix);
+        let mut buff = [0; 1];
+        loop {
+            self.message = SystemMessage::new(&prompt);
+            self.draw();
+            if io::stdin().read(&mut buff)? != 0 {
+                match buff[0].into() {
+                    Action::Cancel => {
+                        //TODO: return Err here
+                        return Ok("".to_string());
+                    }
+                    Action::Input(c) => prompt.push(c),
+                    Action::Enter => return Ok(prompt),
+                    Action::Delete => {
+                        prompt.pop().unwrap();
+                    }
+                    _ => {}
+                };
+            }
+        }
     }
 
     fn insert_newline(&mut self) {
@@ -577,6 +620,7 @@ fn main() -> io::Result<()> {
                         e.insert_char(c)
                     }
                 }
+                Action::Cancel => {}
             }
 
             e.draw();
