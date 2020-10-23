@@ -388,7 +388,10 @@ impl Editor {
             }
 
             if positions.is_empty() {
-                self.message = SystemMessage::new(&format!("Couldnt find {}", search_term));
+                return Err(Error::new(
+                    ErrorKind::NotFound,
+                    format!("Find: Couldn't find {}", search_term),
+                ));
             } else {
                 return Ok(CursorPosition {
                     x: positions[0].0,
@@ -398,11 +401,9 @@ impl Editor {
         } else {
             return Err(Error::new(
                 ErrorKind::Other,
-                "find: no search term was found",
+                "Find: no search term was found",
             ));
         }
-
-        Ok(CursorPosition::default())
     }
 
     /// Draws out the current state held in the editor to the terminal
@@ -511,11 +512,10 @@ impl Editor {
     }
 
     fn prompt(&mut self, prompt_prefix: &str) -> io::Result<String> {
-        let mut prompt = String::from(prompt_prefix);
         let mut input = String::new();
         let mut buff = [0; 1];
         loop {
-            self.message = SystemMessage::new(&format!("{} {}", prompt, input));
+            self.message = SystemMessage::new(&format!("{} {}", prompt_prefix, input));
             self.draw();
             if io::stdin().read(&mut buff)? != 0 {
                 match buff[0].into() {
@@ -528,7 +528,7 @@ impl Editor {
                     Action::Input(c) => input.push(c),
                     Action::Enter => return Ok(input),
                     Action::Delete => {
-                        prompt.pop();
+                        input.pop();
                     }
                     _ => {}
                 };
@@ -635,7 +635,16 @@ fn main() -> io::Result<()> {
                 }
                 Action::Find => {
                     match e.find() {
-                        Ok(cp) => e.cur_pos = cp,
+                        Ok(cp) => {
+                            if cp.y > e.term_cols {
+                                e.row_offset = cp.y;
+                                e.cur_pos.y = 0;
+                            } else {
+                                e.cur_pos.y = cp.y
+                            }
+
+                            e.cur_pos.x = cp.x;
+                        },
                         Err(err) => e.message = SystemMessage::new(&err.to_string()),
                     };
                 }
