@@ -589,6 +589,17 @@ impl Editor {
 
         self.move_cursor(&NavigationKey::Left);
     }
+
+    fn jump(&mut self, cp: CursorPosition) {
+        if cp.y > self.term_cols {
+            self.row_offset = cp.y;
+            self.cur_pos.y = 0;
+        } else {
+            self.cur_pos.y = cp.y
+        }
+
+        self.cur_pos.x = cp.x;
+    }
 }
 
 fn main() -> io::Result<()> {
@@ -635,16 +646,7 @@ fn main() -> io::Result<()> {
                 }
                 Action::Find => {
                     match e.find() {
-                        Ok(cp) => {
-                            if cp.y > e.term_cols {
-                                e.row_offset = cp.y;
-                                e.cur_pos.y = 0;
-                            } else {
-                                e.cur_pos.y = cp.y
-                            }
-
-                            e.cur_pos.x = cp.x;
-                        },
+                        Ok(cp) => e.jump(cp),
                         Err(err) => e.message = SystemMessage::new(&err.to_string()),
                     };
                 }
