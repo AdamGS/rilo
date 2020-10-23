@@ -2,6 +2,7 @@
 #![warn(clippy::pedantic)]
 
 use nix::libc::{ioctl, TIOCGWINSZ};
+use nix::Error::Sys;
 use std::cmp::Ordering;
 use std::fs::{File, OpenOptions};
 use std::io::prelude::*;
@@ -38,12 +39,12 @@ enum NavigationKey {
 
 enum Action {
     Quit,
-    Refresh,
     Escape,
     Save,
     Delete,
     Enter,
     Cancel,
+    Find,
     Input(char),
 }
 
@@ -51,12 +52,12 @@ impl From<u8> for Action {
     fn from(c: u8) -> Self {
         if c == ctrl_key('q') {
             Action::Quit
-        } else if c == ctrl_key('x') {
-            Action::Refresh
         } else if c == ctrl_key('s') {
             Action::Save
         } else if c == ctrl_key('c') {
             Action::Cancel
+        } else if c == ctrl_key('f') {
+            Action::Find
         } else if c == b'\x1b' {
             Action::Escape
         } else if c == 27 || c == 127 {
@@ -201,9 +202,9 @@ impl Editor {
             row_offset: 0,
             col_offset: 0,
             tab_size: TAB_SIZE,
-            file: Default::default(),
-            rows: Default::default(),
-            message: SystemMessage::new("HELP: Ctrl-S = save | Ctrl-Q = quit"),
+            file: Option::default(),
+            rows: Vec::default(),
+            message: SystemMessage::new("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find"),
             dirty_flag: false,
             path: None,
         }
@@ -324,13 +325,6 @@ impl Editor {
             }
         };
 
-        // Render correct rx
-        // self.rx = if let Some(curr_line) = self.current_line() {
-        //     cx_to_rx(curr_line, self.cur_pos.x)
-        // } else {
-        //     0
-        // };
-
         send_esc_seq(CtrlSeq::MoveCursor(CursorPosition {
             x: self.rx(),
             y: self.cur_pos.y,
@@ -383,6 +377,33 @@ impl Editor {
         }
 
         Ok(())
+    }
+
+    fn find(&mut self) -> io::Result<CursorPosition> {
+        let mut positions: Vec<(usize, usize)> = Vec::new();
+        if let Ok(search_term) = self.prompt("Find:") {
+            for (y, row) in self.rows.iter().enumerate() {
+                if let Some(x) = row.find(&search_term) {
+                    positions.push((x, y));
+                }
+            }
+
+            if positions.is_empty() {
+                self.message = SystemMessage::new(&format!("Couldnt find {}", search_term));
+            } else {
+                return Ok(CursorPosition {
+                    x: positions[0].0,
+                    y: positions[0].1,
+                });
+            }
+        } else {
+            return Err(io::Error::new(
+                ErrorKind::Other,
+                "find: no search term was found",
+            ));
+        }
+
+        Ok(CursorPosition::default())
     }
 
     /// Draws out the current state held in the editor to the terminal
@@ -467,13 +488,13 @@ impl Editor {
                 );
                 v.extend(open_file.as_bytes());
                 let current_line_idx = self.cur_pos.y + self.row_offset;
-                let precenteges = ((current_line_idx + 1) * 100)
+                let percentages = ((current_line_idx + 1) * 100)
                     .checked_div(self.rows.len())
                     .unwrap_or(0);
                 let lines = format!("{}/{}", current_line_idx + 1, self.rows.len());
                 v.extend(lines.as_bytes());
-                let formated = format!("        {}%", precenteges);
-                v.extend(formated.as_bytes());
+                let formatted = format!("        {}%", percentages);
+                v.extend(formatted.as_bytes());
 
                 if let Some(message) = &self.message.message {
                     if self.message.time.elapsed() < Duration::from_secs(5) {
@@ -494,20 +515,23 @@ impl Editor {
 
     fn prompt(&mut self, prompt_prefix: &str) -> io::Result<String> {
         let mut prompt = String::from(prompt_prefix);
+        let mut input = String::new();
         let mut buff = [0; 1];
         loop {
-            self.message = SystemMessage::new(&prompt);
+            self.message = SystemMessage::new(&format!("{} {}", prompt, input));
             self.draw();
             if io::stdin().read(&mut buff)? != 0 {
                 match buff[0].into() {
                     Action::Cancel => {
-                        //TODO: return Err here
-                        return Ok("".to_string());
+                        return Err(io::Error::new(
+                            ErrorKind::Other,
+                            "prompt: action cancelled".to_string(),
+                        ));
                     }
-                    Action::Input(c) => prompt.push(c),
-                    Action::Enter => return Ok(prompt),
+                    Action::Input(c) => input.push(c),
+                    Action::Enter => return Ok(input),
                     Action::Delete => {
-                        prompt.pop().unwrap();
+                        prompt.pop();
                     }
                     _ => {}
                 };
@@ -519,7 +543,7 @@ impl Editor {
         self.dirty_flag = true;
         let x = self.cur_pos.x + self.col_offset;
         let y = self.cur_pos.y + self.row_offset;
-        let curr_line = self.rows[y].clone();
+        let curr_line = self.current_line().unwrap().to_owned();
         self.rows.insert(y, String::new());
         self.rows[y] = curr_line[0..x].to_string();
         self.rows[y + 1] = curr_line[x..].to_string();
@@ -556,7 +580,7 @@ impl Editor {
         // Remove row and move one up
         if x == 0 {
             if let Some(line) = &mut self.current_line() {
-                self.rows[y - 1] = [self.rows[y - 1].clone(), line.to_string()].concat();
+                self.rows[y - 1] = [self.rows[y - 1].clone(), (**line).to_string()].concat();
                 self.rows.remove(y);
             }
         } else {
@@ -573,7 +597,11 @@ impl Editor {
 fn main() -> io::Result<()> {
     let mut e = Editor::new();
 
-    refresh_screen();
+    // Clear the screen
+    send_esc_seq(CtrlSeq::HideCursor);
+    send_esc_seq(CtrlSeq::ClearScreen);
+    send_esc_seq(CtrlSeq::ShowCursor);
+
     let args: Vec<String> = std::env::args().collect();
 
     // TODO: Change to clap or another library that handles command line arguments
@@ -592,9 +620,6 @@ fn main() -> io::Result<()> {
                     send_esc_seq(CtrlSeq::GotoStart);
                     break;
                 }
-                Action::Refresh => {
-                    refresh_screen();
-                }
                 Action::Escape => {
                     if let Ok(ak) = handle_escape_seq() {
                         e.move_cursor(&ak);
@@ -610,6 +635,12 @@ fn main() -> io::Result<()> {
                         e.message = SystemMessage::new("No Changes Made!");
                         e.dirty_flag = false;
                     }
+                }
+                Action::Find => {
+                    match e.find() {
+                        Ok(cp) => e.cur_pos = cp,
+                        Err(err) => e.message = SystemMessage::new(&err.to_string()),
+                    };
                 }
                 Action::Delete => {
                     e.remove_char();
@@ -644,19 +675,13 @@ fn handle_escape_seq() -> io::Result<NavigationKey> {
             b'F' => NavigationKey::End,
             b'5' => NavigationKey::PageUp,
             b'6' => NavigationKey::PageDown,
-            _ => return Err(Error::from(ErrorKind::InvalidData)),
+            _ => return Err(io::Error::from(ErrorKind::InvalidData)),
         };
 
         Ok(movement)
     } else {
-        Err(Error::from(ErrorKind::InvalidData))
+        Err(io::Error::from(ErrorKind::InvalidData))
     }
-}
-
-fn refresh_screen() {
-    send_esc_seq(CtrlSeq::HideCursor);
-    send_esc_seq(CtrlSeq::ClearScreen);
-    send_esc_seq(CtrlSeq::ShowCursor);
 }
 
 fn render_row(row: &str, tab_size: u8) -> Vec<u8> {
@@ -684,7 +709,7 @@ fn get_window_size() -> io::Result<(i16, i16)> {
 
     let return_code = unsafe { ioctl(fd, TIOCGWINSZ, &mut winsize as *mut _) };
     if (return_code == -1) || (winsize.ws_col == 0) {
-        Err(Error::new(
+        Err(io::Error::new(
             ErrorKind::Other,
             "get_window_size: ioctl failed or returned invalid value",
         ))

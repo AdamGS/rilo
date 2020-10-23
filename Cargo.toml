@@ -8,4 +8,4 @@ edition = "2018"
 
 [dependencies]
 termios = "0.3"
-nix = "0.17"
+nix = "0.19"
