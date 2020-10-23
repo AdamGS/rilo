@@ -2,7 +2,6 @@
 #![warn(clippy::pedantic)]
 
 use nix::libc::{ioctl, TIOCGWINSZ};
-use nix::Error::Sys;
 use std::cmp::Ordering;
 use std::fs::{File, OpenOptions};
 use std::io::prelude::*;
@@ -397,7 +396,7 @@ impl Editor {
                 });
             }
         } else {
-            return Err(io::Error::new(
+            return Err(Error::new(
                 ErrorKind::Other,
                 "find: no search term was found",
             ));
@@ -456,16 +455,14 @@ impl Editor {
     }
 
     fn rx(&self) -> usize {
-        if let Some(line) = self.current_line() {
+        self.current_line().map_or(0, |line| {
             line[0..self.cur_pos.x]
                 .chars()
                 .fold(0, |acc, c| match c.cmp(&'\t') {
                     Ordering::Equal => acc + 4,
                     _ => acc + 1,
                 })
-        } else {
-            0
-        }
+        })
     }
 
     fn render_status_bar(&self) -> Vec<u8> {
@@ -523,7 +520,7 @@ impl Editor {
             if io::stdin().read(&mut buff)? != 0 {
                 match buff[0].into() {
                     Action::Cancel => {
-                        return Err(io::Error::new(
+                        return Err(Error::new(
                             ErrorKind::Other,
                             "prompt: action cancelled".to_string(),
                         ));
@@ -675,12 +672,12 @@ fn handle_escape_seq() -> io::Result<NavigationKey> {
             b'F' => NavigationKey::End,
             b'5' => NavigationKey::PageUp,
             b'6' => NavigationKey::PageDown,
-            _ => return Err(io::Error::from(ErrorKind::InvalidData)),
+            _ => return Err(Error::from(ErrorKind::InvalidData)),
         };
 
         Ok(movement)
     } else {
-        Err(io::Error::from(ErrorKind::InvalidData))
+        Err(Error::from(ErrorKind::InvalidData))
     }
 }
 
@@ -709,7 +706,7 @@ fn get_window_size() -> io::Result<(i16, i16)> {
 
     let return_code = unsafe { ioctl(fd, TIOCGWINSZ, &mut winsize as *mut _) };
     if (return_code == -1) || (winsize.ws_col == 0) {
-        Err(io::Error::new(
+        Err(Error::new(
             ErrorKind::Other,
             "get_window_size: ioctl failed or returned invalid value",
         ))
